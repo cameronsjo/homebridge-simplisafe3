@@ -179,10 +179,10 @@ class KinesisStreamingDelegate {
         this.pendingSessions = {};
         this.ongoingSessions = {};
 
-        // Snapshot cache
+        // Snapshot cache - extend TTL for battery cameras not plugged in
         this.cachedSnapshot = null;
         this.snapshotCacheTime = 0;
-        this.snapshotCacheTTL = 60000; // 1 minute cache
+        this.snapshotCacheTTL = this._calculateSnapshotCacheTTL();
 
         // Create Kinesis client
         this.kinesisClient = new KinesisClient(ss3Camera.authManager, this.log, ss3Camera.debug);
@@ -857,6 +857,51 @@ class KinesisStreamingDelegate {
 
         delete this.ongoingSessions[sessionIdentifier];
         this.log(`[KinesisDelegate] Session ${shortId} stopped`);
+    }
+
+    /**
+     * Calculate snapshot cache TTL based on camera power source
+     * Battery cameras not plugged in get extended cache to preserve battery
+     */
+    _calculateSnapshotCacheTTL() {
+        const DEFAULT_TTL = 60000; // 1 minute for wired cameras
+        const BATTERY_TTL = 300000; // 5 minutes for battery cameras
+
+        const isBatteryCamera = this.cameraDetails.supportedFeatures?.battery === true;
+        const isPluggedIn = this.cameraDetails.currentState?.batteryCharging === true;
+
+        if (isBatteryCamera && !isPluggedIn) {
+            if (this.ss3Camera.debug) {
+                this.log(
+                    '[KinesisDelegate] Battery camera detected (not charging) - using extended snapshot cache (5 min)'
+                );
+            }
+            return BATTERY_TTL;
+        }
+
+        return DEFAULT_TTL;
+    }
+
+    /**
+     * Check if this camera supports battery power
+     */
+    isBatteryCamera() {
+        return this.cameraDetails.supportedFeatures?.battery === true;
+    }
+
+    /**
+     * Get current battery level (0-100) or null if not a battery camera
+     */
+    getBatteryLevel() {
+        if (!this.isBatteryCamera()) return null;
+        return this.cameraDetails.cameraStatus?.batteryPercentage ?? null;
+    }
+
+    /**
+     * Check if camera is currently charging/plugged in
+     */
+    isCharging() {
+        return this.cameraDetails.currentState?.batteryCharging === true;
     }
 }
 

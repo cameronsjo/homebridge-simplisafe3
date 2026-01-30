@@ -101,6 +101,107 @@ class SS3Camera extends SimpliSafe3Accessory {
                     )
                 );
         }
+
+        // Add battery service for battery-capable cameras
+        if (this._isBatteryCamera()) {
+            this._setupBatteryService();
+        }
+    }
+
+    /**
+     * Check if this camera supports battery power
+     */
+    _isBatteryCamera() {
+        return this.cameraDetails.supportedFeatures?.battery === true;
+    }
+
+    /**
+     * Set up HomeKit BatteryService for battery-capable cameras
+     */
+    _setupBatteryService() {
+        if (!this.accessory.getService(this.api.hap.Service.Battery)) {
+            this.accessory.addService(this.api.hap.Service.Battery, `${this.name} Battery`);
+        }
+
+        const batteryService = this.accessory.getService(this.api.hap.Service.Battery);
+
+        // Battery Level (0-100)
+        batteryService
+            .getCharacteristic(this.api.hap.Characteristic.BatteryLevel)
+            .on('get', (callback) => this._getBatteryLevel(callback));
+
+        // Charging State
+        batteryService
+            .getCharacteristic(this.api.hap.Characteristic.ChargingState)
+            .on('get', (callback) => this._getChargingState(callback));
+
+        // Status Low Battery (triggered at 20%)
+        batteryService
+            .getCharacteristic(this.api.hap.Characteristic.StatusLowBattery)
+            .on('get', (callback) => this._getStatusLowBattery(callback));
+
+        // Set initial values
+        this._updateBatteryStatus();
+
+        if (this.debug) {
+            const level = this.cameraDetails.cameraStatus?.batteryPercentage ?? 'unknown';
+            const charging = this.cameraDetails.currentState?.batteryCharging ? 'charging' : 'not charging';
+            this.log(`Battery service added for '${this.name}': ${level}%, ${charging}`);
+        }
+    }
+
+    /**
+     * Update battery status from camera details
+     */
+    _updateBatteryStatus() {
+        if (!this._isBatteryCamera()) return;
+
+        const batteryService = this.accessory.getService(this.api.hap.Service.Battery);
+        if (!batteryService) return;
+
+        const level = this.cameraDetails.cameraStatus?.batteryPercentage ?? 100;
+        const isCharging = this.cameraDetails.currentState?.batteryCharging === true;
+        const isLowBattery = level <= 20;
+
+        batteryService.updateCharacteristic(this.api.hap.Characteristic.BatteryLevel, level);
+        batteryService.updateCharacteristic(
+            this.api.hap.Characteristic.ChargingState,
+            isCharging
+                ? this.api.hap.Characteristic.ChargingState.CHARGING
+                : this.api.hap.Characteristic.ChargingState.NOT_CHARGING
+        );
+        batteryService.updateCharacteristic(
+            this.api.hap.Characteristic.StatusLowBattery,
+            isLowBattery
+                ? this.api.hap.Characteristic.StatusLowBattery.BATTERY_LEVEL_LOW
+                : this.api.hap.Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL
+        );
+    }
+
+    _getBatteryLevel(callback) {
+        const level = this.cameraDetails.cameraStatus?.batteryPercentage ?? 100;
+        callback(null, level);
+    }
+
+    _getChargingState(callback) {
+        const isCharging = this.cameraDetails.currentState?.batteryCharging === true;
+        callback(
+            null,
+            isCharging
+                ? this.api.hap.Characteristic.ChargingState.CHARGING
+                : this.api.hap.Characteristic.ChargingState.NOT_CHARGING
+        );
+    }
+
+    _getStatusLowBattery(callback) {
+        const level = this.cameraDetails.cameraStatus?.batteryPercentage ?? 100;
+        const isLowBattery = level <= 20;
+        callback(
+            null,
+            isLowBattery
+                ? this.api.hap.Characteristic.StatusLowBattery.BATTERY_LEVEL_LOW
+                : this.api.hap.Characteristic.StatusLowBattery.BATTERY_LEVEL_NORMAL
+        );
     }
 
     getState(callback, service, characteristicType) {
