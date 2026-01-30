@@ -5,8 +5,11 @@
 [![GitHub Release](https://img.shields.io/github/v/release/cameronsjo/homebridge-simplisafe3?style=flat-square)](https://github.com/cameronsjo/homebridge-simplisafe3/releases)
 [![GitHub Last Commit](https://img.shields.io/github/last-commit/cameronsjo/homebridge-simplisafe3?style=flat-square)](https://github.com/cameronsjo/homebridge-simplisafe3/commits/main)
 [![License](https://img.shields.io/github/license/cameronsjo/homebridge-simplisafe3?style=flat-square)](LICENSE)
-[![Biome](https://img.shields.io/badge/code%20style-biome-60a5fa?style=flat-square)](https://biomejs.dev)
-[![mise](https://img.shields.io/badge/mise-enabled-blue?style=flat-square)](https://mise.jdx.dev)
+[![Node](https://img.shields.io/badge/node-20-brightgreen?style=flat-square&logo=nodedotjs)](https://nodejs.org)
+[![mise](https://img.shields.io/badge/mise-enabled-blue?style=flat-square&logo=data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHBhdGggZmlsbD0iI2ZmZiIgZD0iTTEyIDJMMiA3bDEwIDUgMTAtNS0xMC01ek0yIDE3bDEwIDUgMTAtNS0xMC01LTEwIDV6Ii8+PC9zdmc+)](https://mise.jdx.dev)
+[![Biome](https://img.shields.io/badge/biome-enabled-60a5fa?style=flat-square&logo=biome)](https://biomejs.dev)
+[![Code Style](https://img.shields.io/badge/code%20style-biome-60a5fa?style=flat-square)](https://biomejs.dev)
+[![Complexity](https://img.shields.io/badge/complexity%20warnings-21-yellow?style=flat-square)](docs/plans/2026-01-30-api-discovery-notes.md)
 
 A fork of [homebridge-simplisafe3](https://github.com/homebridge-simplisafe3/homebridge-simplisafe3) with **native WebRTC support for outdoor cameras**.
 
@@ -174,6 +177,32 @@ node scripts/dump-camera-data.js <access_token> [--full]
 - [WebRTC Implementation Details](docs/kinesis-webrtc-implementation.md)
 - [Testing Documentation](docs/kinesis-webrtc-testing.md)
 - [API Discovery Notes](docs/plans/2026-01-30-api-discovery-notes.md)
+
+## Code Quality
+
+This fork uses [Biome](https://biomejs.dev) for linting and formatting.
+
+```bash
+npx biome check src/          # Check for issues
+npx biome check --write src/  # Auto-fix issues
+npx biome format --write src/ # Format only
+```
+
+### Complexity Warnings (21)
+
+Functions flagged for future refactoring:
+
+| File | Function | Complexity |
+|------|----------|------------|
+| `simplisafe.js` | WebSocket message handler | 33 |
+| `simplisafe.js` | `subscribeToSensor` | 27 |
+| `simplisafe.js` | `subscribeToAlarmSystem` | 27 |
+| `index.js` | Plugin initialization | High |
+| `kinesisClient.js` | Session creation | High |
+| `streamingDelegate.js` | Stream handling | High |
+| Various sensors | Callback handlers | Medium |
+
+These are warnings, not errors - the code works correctly.
 
 ## Known Issues
 
