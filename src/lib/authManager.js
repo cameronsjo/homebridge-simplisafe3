@@ -1,16 +1,16 @@
 // © 2021 Michael Shamoon
 // SimpliSafe 3 Authentication Manager
 
-const crypto = require('crypto');
+const crypto = require('node:crypto');
 const axios = require('axios');
 const axiosRetry = require('axios-retry');
-const fs = require('fs');
-const path = require('path');
-const events = require('events');
+const fs = require('node:fs');
+const path = require('node:path');
+const events = require('node:events');
 
 export const AUTH_EVENTS = {
     REFRESH_CREDENTIALS_SUCCESS: 'REFRESH_CREDENTIALS_SUCCESS',
-    REFRESH_CREDENTIALS_FAILURE: 'REFRESH_CREDENTIALS_FAILURE',
+    REFRESH_CREDENTIALS_FAILURE: 'REFRESH_CREDENTIALS_FAILURE'
 };
 
 const ssOAuth = axios.create({
@@ -20,12 +20,13 @@ axiosRetry(ssOAuth, { retries: 3 });
 
 const SS_OAUTH_AUTH_URL = 'https://auth.simplisafe.com/authorize';
 const SS_OAUTH_CLIENT_ID = '42aBZ5lYrVW12jfOuu3CQROitwxg9sN5';
-const SS_OAUTH_AUTH0_CLIENT = 'eyJ2ZXJzaW9uIjoiMi4zLjIiLCJuYW1lIjoiQXV0aDAuc3dpZnQiLCJlbnYiOnsic3dpZnQiOiI1LngiLCJpT1MiOiIxNi4zIn19';
+const SS_OAUTH_AUTH0_CLIENT =
+    'eyJ2ZXJzaW9uIjoiMi4zLjIiLCJuYW1lIjoiQXV0aDAuc3dpZnQiLCJlbnYiOnsic3dpZnQiOiI1LngiLCJpT1MiOiIxNi4zIn19';
 const SS_OAUTH_REDIRECT_URI = 'com.simplisafe.mobile://auth.simplisafe.com/ios/com.simplisafe.mobile/callback';
 const SS_OAUTH_SCOPE = 'offline_access%20email%20openid%20https://api.simplisafe.com/scopes/user:platform';
 const SS_OAUTH_AUDIENCE = 'https://api.simplisafe.com/';
 const SS_OAUTH_DEVICE = 'iPhone';
-const SS_OAUTH_DEVICE_UUID = "0000007E-0000-1000-8000-0026BB765291"; // anything, e.g. hap.Service.SecuritySystem.UUID
+const SS_OAUTH_DEVICE_UUID = '0000007E-0000-1000-8000-0026BB765291'; // anything, e.g. hap.Service.SecuritySystem.UUID
 
 const accountsFilename = 'simplisafe3auth.json';
 
@@ -83,7 +84,7 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
             let fileContents;
 
             try {
-                fileContents = (fs.readFileSync(path.join(this.storagePath, accountsFilename))).toString();
+                fileContents = fs.readFileSync(path.join(this.storagePath, accountsFilename)).toString();
             } catch {
                 fileContents = '{}';
             }
@@ -113,7 +114,7 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
                 throw new Error();
             }
             code = maybeCode;
-        } catch (error) {
+        } catch (_error) {
             throw new Error('Invalid redirect URL');
         }
 
@@ -121,10 +122,7 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
     }
 
     base64URLEncode(str) {
-        return str.toString('base64')
-            .replace(/\+/g, '-')
-            .replace(/\//g, '_')
-            .replace(/=/g, '');
+        return str.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
     }
 
     sha256(buffer) {
@@ -138,18 +136,18 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
                 client_id: SS_OAUTH_CLIENT_ID,
                 code_verifier: this.codeVerifier,
                 code: authorizationCode,
-                redirect_uri: SS_OAUTH_REDIRECT_URI,
+                redirect_uri: SS_OAUTH_REDIRECT_URI
             });
 
             await this._storeToken(tokenResponse.data);
             return this.accessToken;
         } catch (err) {
-            throw new Error('Error getting token: ' + err.message ? err.message : err.toString());
+            throw new Error(`Error getting token: ${err.message ? err.message : err.toString()}`);
         }
     }
 
     async refreshCredentials() {
-        if (!this.accountsFileExists() && this.refreshToken == undefined) {
+        if (!this.accountsFileExists() && this.refreshToken === undefined) {
             throw new Error('No valid authentication credentials detected.');
         }
 
@@ -158,23 +156,31 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
                 // E.g. re-trying after failed attempt
                 this.parseAccountsFile();
             }
-            const refreshTokenResponse = await ssOAuth.post('/token', {
-                grant_type: 'refresh_token',
-                client_id: SS_OAUTH_CLIENT_ID,
-                refresh_token: this.refreshToken
-            }, {
-                headers: { // SS seems to need these...
-                    'Host': 'auth.simplisafe.com',
-                    'Content-Type': 'application/json',
-                    'Auth0-Client': SS_OAUTH_AUTH0_CLIENT
+            const refreshTokenResponse = await ssOAuth.post(
+                '/token',
+                {
+                    grant_type: 'refresh_token',
+                    client_id: SS_OAUTH_CLIENT_ID,
+                    refresh_token: this.refreshToken
+                },
+                {
+                    headers: {
+                        // SS seems to need these...
+                        Host: 'auth.simplisafe.com',
+                        'Content-Type': 'application/json',
+                        'Auth0-Client': SS_OAUTH_AUTH0_CLIENT
+                    }
                 }
-            });
+            );
             await this._storeToken(refreshTokenResponse.data);
             this.emit(AUTH_EVENTS.REFRESH_CREDENTIALS_SUCCESS);
             if (this.log && this.debug) this.log('SimpliSafe credentials refresh was successful');
         } catch (err) {
             if (this.log && this.debug) this.log('SimpliSafe credentials refresh failed');
-            if (err.response && (String(err.response.status).indexOf('4') == 0 || err.response.data == 'Unauthorized')) {
+            if (
+                err.response &&
+                (String(err.response.status).indexOf('4') === 0 || err.response.data === 'Unauthorized')
+            ) {
                 // this is a true auth failure
                 this.refreshToken = this.accessToken = null;
                 this.emit(AUTH_EVENTS.REFRESH_CREDENTIALS_FAILURE);
@@ -186,7 +192,7 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
     async _storeToken(token) {
         this.accessToken = token.access_token;
         this.refreshToken = token.refresh_token ?? this.refreshToken;
-        this.expiry = Date.now() + (parseInt(token.expires_in) * 1000);
+        this.expiry = Date.now() + parseInt(token.expires_in, 10) * 1000;
         this.tokenType = token.token_type;
 
         const account = {
@@ -196,30 +202,28 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
         };
 
         try {
-            fs.writeFileSync(
-                path.join(this.storagePath, accountsFilename),
-                JSON.stringify(account)
-            );
+            fs.writeFileSync(path.join(this.storagePath, accountsFilename), JSON.stringify(account));
         } catch (err) {
-            if (this.log && this.log.error) this.log.error('Unable to write accounts file.', err);
+            if (this.log?.error) this.log.error('Unable to write accounts file.', err);
             throw new Error(`Failed storing token with error message "${err.message}"`);
         }
 
         if (this.refreshInterval) {
             clearInterval(this.refreshInterval);
         }
-        this.refreshInterval = setInterval(() => {
-            if (this.log && this.debug) this.log('Preemptively authenticating with SimpliSafe');
-            this.refreshCredentials()
-                .catch(err => {
-                    if (this.log && this.log.error) this.log.error(err.toJSON ? err.toJSON() : err);
-                    if (err.response && (err.response.status == 403 || err.response.data == 'Unauthorized')) {
+        this.refreshInterval = setInterval(
+            () => {
+                if (this.log && this.debug) this.log('Preemptively authenticating with SimpliSafe');
+                this.refreshCredentials().catch((err) => {
+                    if (this.log?.error) this.log.error(err.toJSON ? err.toJSON() : err);
+                    if (err.response && (err.response.status === 403 || err.response.data === 'Unauthorized')) {
                         clearInterval(this.refreshInterval); // just disable until next successful one
                     }
                 });
-        }, parseInt(token.expires_in) * 1000 - 300000);
+            },
+            parseInt(token.expires_in, 10) * 1000 - 300000
+        );
     }
-
 }
 
 module.exports.SimpliSafe3AuthenticationManager = SimpliSafe3AuthenticationManager;

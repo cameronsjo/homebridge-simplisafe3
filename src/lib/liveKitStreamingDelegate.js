@@ -25,13 +25,11 @@
  */
 
 /*global Buffer, process */
-import { spawn } from 'child_process';
-import crypto from 'crypto';
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { Room, RoomEvent, TrackKind, VideoStream } from '@livekit/rtc-node';
 import ip from 'ip';
-import path from 'path';
-import fs from 'fs';
-
-import { Room, RoomEvent, TrackKind, VideoStream, dispose } from '@livekit/rtc-node';
 
 // SimpliSafe's LiveKit server endpoint
 const LIVEKIT_URL = 'wss://livestream.services.simplisafe.com:7880';
@@ -59,8 +57,8 @@ class LiveKitStreamingDelegate {
         this.snapshotCacheTime = 0;
         this.snapshotCacheTTL = 60000; // 1 minute cache
 
-        let fps = this.cameraDetails.cameraSettings?.admin?.fps || 30;
-        let streamingOptions = {
+        const fps = this.cameraDetails.cameraSettings?.admin?.fps || 30;
+        const streamingOptions = {
             supportedCryptoSuites: [this.api.hap.SRTPCryptoSuites.AES_CM_128_HMAC_SHA1_80],
             video: {
                 resolutions: [
@@ -76,8 +74,16 @@ class LiveKitStreamingDelegate {
                     [1920, 1080, fps]
                 ],
                 codec: {
-                    profiles: [this.api.hap.H264Profile.BASELINE, this.api.hap.H264Profile.MAIN, this.api.hap.H264Profile.HIGH],
-                    levels: [this.api.hap.H264Level.LEVEL3_1, this.api.hap.H264Level.LEVEL3_2, this.api.hap.H264Level.LEVEL4_0],
+                    profiles: [
+                        this.api.hap.H264Profile.BASELINE,
+                        this.api.hap.H264Profile.MAIN,
+                        this.api.hap.H264Profile.HIGH
+                    ],
+                    levels: [
+                        this.api.hap.H264Level.LEVEL3_1,
+                        this.api.hap.H264Level.LEVEL3_2,
+                        this.api.hap.H264Level.LEVEL4_0
+                    ]
                 }
             },
             audio: {
@@ -90,9 +96,11 @@ class LiveKitStreamingDelegate {
             }
         };
 
-        let resolution = this.cameraDetails.cameraSettings?.pictureQuality || '1080p';
-        let maxSupportedHeight = +(resolution.split('p')[0]);
-        streamingOptions.video.resolutions = streamingOptions.video.resolutions.filter(r => r[1] <= maxSupportedHeight);
+        const resolution = this.cameraDetails.cameraSettings?.pictureQuality || '1080p';
+        const maxSupportedHeight = +resolution.split('p')[0];
+        streamingOptions.video.resolutions = streamingOptions.video.resolutions.filter(
+            (r) => r[1] <= maxSupportedHeight
+        );
 
         const cameraController = new this.api.hap.CameraController({
             cameraStreamCount: 2,
@@ -103,7 +111,9 @@ class LiveKitStreamingDelegate {
         this.controller = cameraController;
 
         if (this.ss3Camera.debug) {
-            this.log(`[LiveKitDelegate] Initialized: camera='${this.cameraDetails.cameraSettings?.cameraName || ss3Camera.name}' model=${this.cameraDetails.model} resolution=${resolution} fps=${fps}`);
+            this.log(
+                `[LiveKitDelegate] Initialized: camera='${this.cameraDetails.cameraSettings?.cameraName || ss3Camera.name}' model=${this.cameraDetails.model} resolution=${resolution} fps=${fps}`
+            );
         }
     }
 
@@ -121,10 +131,12 @@ class LiveKitStreamingDelegate {
         this.log(`[LiveKitDelegate] Snapshot requested for '${cameraName}' at ${resolution}`);
 
         // Check cache first
-        if (this.cachedSnapshot && (Date.now() - this.snapshotCacheTime) < this.snapshotCacheTTL) {
+        if (this.cachedSnapshot && Date.now() - this.snapshotCacheTime < this.snapshotCacheTTL) {
             const cacheAge = Math.round((Date.now() - this.snapshotCacheTime) / 1000);
             if (this.ss3Camera.debug) {
-                this.log(`[LiveKitDelegate] Returning cached snapshot (age: ${cacheAge}s, size: ${Math.round(this.cachedSnapshot.length / 1024)}KB)`);
+                this.log(
+                    `[LiveKitDelegate] Returning cached snapshot (age: ${cacheAge}s, size: ${Math.round(this.cachedSnapshot.length / 1024)}KB)`
+                );
             }
             callback(undefined, this.cachedSnapshot);
             return;
@@ -137,10 +149,14 @@ class LiveKitStreamingDelegate {
             const snapshot = await this._captureSnapshotFromLiveKit(request.width, request.height);
             this.cachedSnapshot = snapshot;
             this.snapshotCacheTime = Date.now();
-            this.log(`[LiveKitDelegate] Snapshot captured in ${Date.now() - startTime}ms (size: ${Math.round(snapshot.length / 1024)}KB)`);
+            this.log(
+                `[LiveKitDelegate] Snapshot captured in ${Date.now() - startTime}ms (size: ${Math.round(snapshot.length / 1024)}KB)`
+            );
             callback(undefined, snapshot);
         } catch (err) {
-            this.log.error(`[LiveKitDelegate] Snapshot capture failed after ${Date.now() - startTime}ms: ${err.message} (using placeholder)`);
+            this.log.error(
+                `[LiveKitDelegate] Snapshot capture failed after ${Date.now() - startTime}ms: ${err.message} (using placeholder)`
+            );
             callback(undefined, unsupportedCameraImageInBytes);
         }
     }
@@ -156,7 +172,7 @@ class LiveKitStreamingDelegate {
             const room = new Room();
             let resolved = false;
 
-            room.on(RoomEvent.TrackSubscribed, async (track, publication, participant) => {
+            room.on(RoomEvent.TrackSubscribed, async (track, _publication, _participant) => {
                 if (resolved || track.kind !== TrackKind.KIND_VIDEO) return;
 
                 try {
@@ -190,7 +206,7 @@ class LiveKitStreamingDelegate {
                 }
             });
 
-            room.connect(LIVEKIT_URL, token, { autoSubscribe: true }).catch(err => {
+            room.connect(LIVEKIT_URL, token, { autoSubscribe: true }).catch((err) => {
                 if (!resolved) {
                     resolved = true;
                     clearTimeout(timeout);
@@ -218,24 +234,32 @@ class LiveKitStreamingDelegate {
             }
 
             const ffmpegArgs = [
-                '-f', inputFormat,
-                '-pix_fmt', pixFmt,
-                '-s', `${width}x${height}`,
-                '-i', 'pipe:0',
-                '-vframes', '1',
-                '-vf', `scale=${targetWidth}:${targetHeight}`,
-                '-f', 'mjpeg',
-                '-q:v', '5',
+                '-f',
+                inputFormat,
+                '-pix_fmt',
+                pixFmt,
+                '-s',
+                `${width}x${height}`,
+                '-i',
+                'pipe:0',
+                '-vframes',
+                '1',
+                '-vf',
+                `scale=${targetWidth}:${targetHeight}`,
+                '-f',
+                'mjpeg',
+                '-q:v',
+                '5',
                 'pipe:1'
             ];
 
             const ffmpeg = spawn(this.ss3Camera.ffmpegPath, ffmpegArgs, { env: process.env });
             const chunks = [];
 
-            ffmpeg.stdout.on('data', chunk => chunks.push(chunk));
+            ffmpeg.stdout.on('data', (chunk) => chunks.push(chunk));
             ffmpeg.stderr.on('data', () => {}); // Ignore stderr
 
-            ffmpeg.on('close', code => {
+            ffmpeg.on('close', (code) => {
                 if (code === 0 && chunks.length > 0) {
                     resolve(Buffer.concat(chunks));
                 } else {
@@ -261,7 +285,7 @@ class LiveKitStreamingDelegate {
 
         const response = await fetch(
             `https://app-hub.prd.aser.simplisafe.com/v2/cameras/${cameraUuid}/${locationId}/live-view`,
-            { headers: { 'Authorization': `Bearer ${accessToken}` } }
+            { headers: { Authorization: `Bearer ${accessToken}` } }
         );
 
         if (!response.ok) {
@@ -283,7 +307,9 @@ class LiveKitStreamingDelegate {
 
         if (this.ss3Camera.debug) {
             this.log(`[LiveKitDelegate] Preparing stream session ${shortId}...`);
-            this.log(`[LiveKitDelegate] Target: ${request.targetAddress} video=${request.video.port}(mtu:${request.video.mtu || 'default'}) audio=${request.audio.port}`);
+            this.log(
+                `[LiveKitDelegate] Target: ${request.targetAddress} video=${request.video.port}(mtu:${request.video.mtu || 'default'}) audio=${request.audio.port}`
+            );
         }
 
         const videoInfo = {
@@ -301,7 +327,9 @@ class LiveKitStreamingDelegate {
         const currentAddress = ip.address('public', request.addressVersion);
 
         if (this.ss3Camera.debug) {
-            this.log(`[LiveKitDelegate] Prepared: local=${currentAddress} videoSSRC=${videoInfo.video_ssrc} audioSSRC=${videoInfo.audio_ssrc}`);
+            this.log(
+                `[LiveKitDelegate] Prepared: local=${currentAddress} videoSSRC=${videoInfo.video_ssrc} audioSSRC=${videoInfo.audio_ssrc}`
+            );
         }
 
         const response = {
@@ -376,11 +404,11 @@ class LiveKitStreamingDelegate {
         }
 
         // Stream parameters
-        let width = request.video.width ?? 1920;
-        let height = request.video.height ?? 1080;
+        const width = request.video.width ?? 1920;
+        const height = request.video.height ?? 1080;
         let fps = this.cameraDetails.cameraSettings?.admin?.fps || 30;
         let videoBitrate = this.cameraDetails.cameraSettings?.admin?.bitRate || 2000;
-        let mtu = request.video.mtu ?? 1316;
+        const mtu = request.video.mtu ?? 1316;
 
         if (request.video.fps < fps) fps = request.video.fps;
         if (request.video.max_bit_rate < videoBitrate) videoBitrate = request.video.max_bit_rate;
@@ -391,27 +419,47 @@ class LiveKitStreamingDelegate {
 
         // Build FFmpeg command - LiveKit gives us I420 (YUV420P) frames
         const ffmpegArgs = [
-            '-f', 'rawvideo',
-            '-pix_fmt', 'yuv420p',   // LiveKit VideoFrame is I420/YUV420P
-            '-s', '1920x1080',       // LiveKit source resolution
-            '-r', String(fps),
-            '-i', 'pipe:0',
+            '-f',
+            'rawvideo',
+            '-pix_fmt',
+            'yuv420p', // LiveKit VideoFrame is I420/YUV420P
+            '-s',
+            '1920x1080', // LiveKit source resolution
+            '-r',
+            String(fps),
+            '-i',
+            'pipe:0',
 
-            '-map', '0:v',
-            '-vcodec', 'libx264',
-            '-tune', 'zerolatency',
-            '-preset', 'ultrafast',
-            '-pix_fmt', 'yuv420p',
-            '-r', String(fps),
-            '-vf', `scale=${width}:${height}`,
-            '-b:v', `${videoBitrate}k`,
-            '-bufsize', `${2 * videoBitrate}k`,
-            '-maxrate', `${videoBitrate}k`,
-            '-payload_type', '99',
-            '-ssrc', String(sessionInfo.video_ssrc),
-            '-f', 'rtp',
-            '-srtp_out_suite', 'AES_CM_128_HMAC_SHA1_80',
-            '-srtp_out_params', sessionInfo.video_srtp.toString('base64'),
+            '-map',
+            '0:v',
+            '-vcodec',
+            'libx264',
+            '-tune',
+            'zerolatency',
+            '-preset',
+            'ultrafast',
+            '-pix_fmt',
+            'yuv420p',
+            '-r',
+            String(fps),
+            '-vf',
+            `scale=${width}:${height}`,
+            '-b:v',
+            `${videoBitrate}k`,
+            '-bufsize',
+            `${2 * videoBitrate}k`,
+            '-maxrate',
+            `${videoBitrate}k`,
+            '-payload_type',
+            '99',
+            '-ssrc',
+            String(sessionInfo.video_ssrc),
+            '-f',
+            'rtp',
+            '-srtp_out_suite',
+            'AES_CM_128_HMAC_SHA1_80',
+            '-srtp_out_params',
+            sessionInfo.video_srtp.toString('base64'),
             `srtp://${sessionInfo.address}:${sessionInfo.video_port}?rtcpport=${sessionInfo.video_port}&localrtcpport=${sessionInfo.video_port}&pkt_size=${mtu}`
         ];
 
@@ -449,7 +497,7 @@ class LiveKitStreamingDelegate {
             });
 
             // Handle video track subscription
-            room.on(RoomEvent.TrackSubscribed, async (track, publication, participant) => {
+            room.on(RoomEvent.TrackSubscribed, async (track, _publication, participant) => {
                 if (track.kind !== TrackKind.KIND_VIDEO) return;
 
                 if (this.ss3Camera.debug) {
@@ -472,7 +520,9 @@ class LiveKitStreamingDelegate {
                             byteCount += frameBuffer.length;
 
                             if (frameCount === 1 && this.ss3Camera.debug) {
-                                this.log(`[LiveKitDelegate] First frame written (${frame.width}x${frame.height}, type=${frame.type}, ${frameBuffer.length} bytes)`);
+                                this.log(
+                                    `[LiveKitDelegate] First frame written (${frame.width}x${frame.height}, type=${frame.type}, ${frameBuffer.length} bytes)`
+                                );
                             }
                         }
                     }
@@ -496,14 +546,15 @@ class LiveKitStreamingDelegate {
             // Stats logging
             const statsInterval = setInterval(() => {
                 if (this.ss3Camera.debug) {
-                    this.log(`[LiveKitDelegate] Stream stats: ${frameCount} frames, ${Math.round(byteCount / 1024)}KB total`);
+                    this.log(
+                        `[LiveKitDelegate] Stream stats: ${frameCount} frames, ${Math.round(byteCount / 1024)}KB total`
+                    );
                 }
             }, 10000);
 
             this.ongoingSessions[sessionIdentifier].statsInterval = statsInterval;
 
             this.log(`[LiveKitDelegate] Stream started for session ${shortId}`);
-
         } catch (e) {
             this.log.error(`[LiveKitDelegate] Failed to start stream: ${e.message}`);
             if (ffmpeg) ffmpeg.kill('SIGTERM');
@@ -523,7 +574,7 @@ class LiveKitStreamingDelegate {
             } else {
                 return Buffer.from(data);
             }
-        } catch (e) {
+        } catch (_e) {
             return null;
         }
     }
@@ -555,7 +606,7 @@ class LiveKitStreamingDelegate {
                 }
                 session.ffmpeg.stdin.end();
                 session.ffmpeg.kill('SIGTERM');
-            } catch (e) {
+            } catch (_e) {
                 // Ignore errors during cleanup
             }
         }
@@ -564,7 +615,7 @@ class LiveKitStreamingDelegate {
         if (session.room) {
             try {
                 await session.room.disconnect();
-            } catch (e) {
+            } catch (_e) {
                 // Ignore errors during cleanup
             }
         }

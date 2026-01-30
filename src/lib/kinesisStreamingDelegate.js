@@ -1,9 +1,9 @@
 /*global Buffer, process */
-import { spawn } from 'child_process';
-import crypto from 'crypto';
+import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 import ip from 'ip';
-import path from 'path';
-import fs from 'fs';
 
 import KinesisClient from './kinesisClient';
 
@@ -14,11 +14,11 @@ const unsupportedCameraImageInBytes = fs.readFileSync(unsupportedCameraImage);
 const NAL_START_CODE = Buffer.from([0x00, 0x00, 0x00, 0x01]);
 
 // H264 NAL unit types
-const NAL_TYPE_SLICE = 1;      // Non-IDR slice (P/B frame)
-const NAL_TYPE_IDR = 5;        // IDR slice (keyframe)
-const NAL_TYPE_SEI = 6;        // Supplemental enhancement info
-const NAL_TYPE_SPS = 7;        // Sequence parameter set
-const NAL_TYPE_PPS = 8;        // Picture parameter set
+const _NAL_TYPE_SLICE = 1; // Non-IDR slice (P/B frame)
+const NAL_TYPE_IDR = 5; // IDR slice (keyframe)
+const _NAL_TYPE_SEI = 6; // Supplemental enhancement info
+const NAL_TYPE_SPS = 7; // Sequence parameter set
+const NAL_TYPE_PPS = 8; // Picture parameter set
 
 /**
  * H264 RTP Depacketizer - converts RTP payloads to Annex B format for FFmpeg
@@ -32,9 +32,9 @@ class H264Depacketizer {
         this.fuType = 0;
 
         // Keyframe synchronization
-        this.sps = null;       // Cached SPS NAL
-        this.pps = null;       // Cached PPS NAL
-        this.synced = false;   // True once we've seen SPS+PPS+IDR
+        this.sps = null; // Cached SPS NAL
+        this.pps = null; // Cached PPS NAL
+        this.synced = false; // True once we've seen SPS+PPS+IDR
         this.waitingForKeyframe = true;
     }
 
@@ -185,14 +185,10 @@ class KinesisStreamingDelegate {
         this.snapshotCacheTTL = 60000; // 1 minute cache
 
         // Create Kinesis client
-        this.kinesisClient = new KinesisClient(
-            ss3Camera.authManager,
-            this.log,
-            ss3Camera.debug
-        );
+        this.kinesisClient = new KinesisClient(ss3Camera.authManager, this.log, ss3Camera.debug);
 
-        let fps = this.cameraDetails.cameraSettings?.admin?.fps || 30;
-        let streamingOptions = {
+        const fps = this.cameraDetails.cameraSettings?.admin?.fps || 30;
+        const streamingOptions = {
             supportedCryptoSuites: [this.api.hap.SRTPCryptoSuites.AES_CM_128_HMAC_SHA1_80],
             video: {
                 resolutions: [
@@ -208,8 +204,16 @@ class KinesisStreamingDelegate {
                     [1920, 1080, fps]
                 ],
                 codec: {
-                    profiles: [this.api.hap.H264Profile.BASELINE, this.api.hap.H264Profile.MAIN, this.api.hap.H264Profile.HIGH],
-                    levels: [this.api.hap.H264Level.LEVEL3_1, this.api.hap.H264Level.LEVEL3_2, this.api.hap.H264Level.LEVEL4_0],
+                    profiles: [
+                        this.api.hap.H264Profile.BASELINE,
+                        this.api.hap.H264Profile.MAIN,
+                        this.api.hap.H264Profile.HIGH
+                    ],
+                    levels: [
+                        this.api.hap.H264Level.LEVEL3_1,
+                        this.api.hap.H264Level.LEVEL3_2,
+                        this.api.hap.H264Level.LEVEL4_0
+                    ]
                 }
             },
             audio: {
@@ -222,9 +226,11 @@ class KinesisStreamingDelegate {
             }
         };
 
-        let resolution = this.cameraDetails.cameraSettings?.pictureQuality || '1080p';
-        let maxSupportedHeight = +(resolution.split('p')[0]);
-        streamingOptions.video.resolutions = streamingOptions.video.resolutions.filter(r => r[1] <= maxSupportedHeight);
+        const resolution = this.cameraDetails.cameraSettings?.pictureQuality || '1080p';
+        const maxSupportedHeight = +resolution.split('p')[0];
+        streamingOptions.video.resolutions = streamingOptions.video.resolutions.filter(
+            (r) => r[1] <= maxSupportedHeight
+        );
 
         const cameraController = new this.api.hap.CameraController({
             cameraStreamCount: 2,
@@ -235,7 +241,9 @@ class KinesisStreamingDelegate {
         this.controller = cameraController;
 
         if (this.ss3Camera.debug) {
-            this.log(`[KinesisDelegate] Initialized: camera='${this.cameraDetails.cameraSettings?.cameraName || ss3Camera.name}' model=${this.cameraDetails.model} resolution=${resolution} fps=${fps}`);
+            this.log(
+                `[KinesisDelegate] Initialized: camera='${this.cameraDetails.cameraSettings?.cameraName || ss3Camera.name}' model=${this.cameraDetails.model} resolution=${resolution} fps=${fps}`
+            );
         }
     }
 
@@ -253,10 +261,12 @@ class KinesisStreamingDelegate {
         this.log(`[KinesisDelegate] Snapshot requested for '${cameraName}' at ${resolution}`);
 
         // Check cache first
-        if (this.cachedSnapshot && (Date.now() - this.snapshotCacheTime) < this.snapshotCacheTTL) {
+        if (this.cachedSnapshot && Date.now() - this.snapshotCacheTime < this.snapshotCacheTTL) {
             const cacheAge = Math.round((Date.now() - this.snapshotCacheTime) / 1000);
             if (this.ss3Camera.debug) {
-                this.log(`[KinesisDelegate] Returning cached snapshot (age: ${cacheAge}s, size: ${Math.round(this.cachedSnapshot.length / 1024)}KB)`);
+                this.log(
+                    `[KinesisDelegate] Returning cached snapshot (age: ${cacheAge}s, size: ${Math.round(this.cachedSnapshot.length / 1024)}KB)`
+                );
             }
             callback(undefined, this.cachedSnapshot);
             return;
@@ -270,10 +280,14 @@ class KinesisStreamingDelegate {
             const snapshot = await this._captureSnapshotFromWebRTC(request.width, request.height);
             this.cachedSnapshot = snapshot;
             this.snapshotCacheTime = Date.now();
-            this.log(`[KinesisDelegate] Snapshot captured in ${Date.now() - startTime}ms (size: ${Math.round(snapshot.length / 1024)}KB)`);
+            this.log(
+                `[KinesisDelegate] Snapshot captured in ${Date.now() - startTime}ms (size: ${Math.round(snapshot.length / 1024)}KB)`
+            );
             callback(undefined, snapshot);
         } catch (err) {
-            this.log.error(`[KinesisDelegate] Snapshot capture failed after ${Date.now() - startTime}ms: ${err.message} (using placeholder)`);
+            this.log.error(
+                `[KinesisDelegate] Snapshot capture failed after ${Date.now() - startTime}ms: ${err.message} (using placeholder)`
+            );
             callback(undefined, unsupportedCameraImageInBytes);
         }
     }
@@ -289,7 +303,9 @@ class KinesisStreamingDelegate {
         const cameraUuid = this.cameraDetails.uuid;
 
         if (this.ss3Camera.debug) {
-            this.log(`[KinesisDelegate] Starting WebRTC snapshot: location=${locationId} camera=${cameraUuid} size=${width}x${height}`);
+            this.log(
+                `[KinesisDelegate] Starting WebRTC snapshot: location=${locationId} camera=${cameraUuid} size=${width}x${height}`
+            );
         }
 
         let session = null;
@@ -314,17 +330,25 @@ class KinesisStreamingDelegate {
 
                 // Use FFmpeg to decode H264 and capture a single frame
                 const ffmpegArgs = [
-                    '-f', 'h264',           // Input is H264 Annex B stream
-                    '-i', 'pipe:0',
-                    '-vframes', '1',        // Capture one frame
-                    '-vf', `scale=${width}:${height}`,
-                    '-f', 'mjpeg',
-                    '-q:v', '5',
+                    '-f',
+                    'h264', // Input is H264 Annex B stream
+                    '-i',
+                    'pipe:0',
+                    '-vframes',
+                    '1', // Capture one frame
+                    '-vf',
+                    `scale=${width}:${height}`,
+                    '-f',
+                    'mjpeg',
+                    '-q:v',
+                    '5',
                     'pipe:1'
                 ];
 
                 if (this.ss3Camera.debug) {
-                    this.log(`[KinesisDelegate] Spawning FFmpeg for snapshot: ${this.ss3Camera.ffmpegPath} ${ffmpegArgs.join(' ')}`);
+                    this.log(
+                        `[KinesisDelegate] Spawning FFmpeg for snapshot: ${this.ss3Camera.ffmpegPath} ${ffmpegArgs.join(' ')}`
+                    );
                 }
 
                 const ffmpeg = spawn(this.ss3Camera.ffmpegPath, ffmpegArgs, { env: process.env });
@@ -348,7 +372,9 @@ class KinesisStreamingDelegate {
                 ffmpeg.on('close', (code) => {
                     clearTimeout(timeout);
                     if (this.ss3Camera.debug) {
-                        this.log(`[KinesisDelegate] Snapshot FFmpeg closed (code: ${code}, packets: ${rtpPacketCount}, NALs: ${nalCount}, bytes: ${bytesWritten})`);
+                        this.log(
+                            `[KinesisDelegate] Snapshot FFmpeg closed (code: ${code}, packets: ${rtpPacketCount}, NALs: ${nalCount}, bytes: ${bytesWritten})`
+                        );
                     }
                     if (code === 0 && chunks.length > 0) {
                         resolve(Buffer.concat(chunks));
@@ -383,7 +409,7 @@ class KinesisStreamingDelegate {
                                 }
                             }
                             rtpPacketCount++;
-                        } catch (e) {
+                        } catch (_e) {
                             // Stream ended
                         }
                     }
@@ -394,7 +420,7 @@ class KinesisStreamingDelegate {
                     if (rtpPacketCount > 0) {
                         try {
                             ffmpeg.stdin.end();
-                        } catch (e) {
+                        } catch (_e) {
                             // Already ended
                         }
                     }
@@ -419,15 +445,15 @@ class KinesisStreamingDelegate {
             this.log(`[KinesisDelegate] Target: ${request.targetAddress} ${videoPart} ${audioPart}`.trim());
         }
 
-        let response = {};
-        let sessionInfo = {
+        const response = {};
+        const sessionInfo = {
             address: request.targetAddress
         };
 
         if (request.video) {
-            let ssrcSource = crypto.randomBytes(4);
+            const ssrcSource = crypto.randomBytes(4);
             ssrcSource[0] = 0;
-            let ssrc = ssrcSource.readInt32BE(0, true);
+            const ssrc = ssrcSource.readInt32BE(0, true);
 
             response.video = {
                 port: request.video.port,
@@ -437,17 +463,14 @@ class KinesisStreamingDelegate {
             };
 
             sessionInfo.video_port = request.video.port;
-            sessionInfo.video_srtp = Buffer.concat([
-                request.video.srtp_key,
-                request.video.srtp_salt
-            ]);
+            sessionInfo.video_srtp = Buffer.concat([request.video.srtp_key, request.video.srtp_salt]);
             sessionInfo.video_ssrc = ssrc;
         }
 
         if (request.audio) {
-            let ssrcSource = crypto.randomBytes(4);
+            const ssrcSource = crypto.randomBytes(4);
             ssrcSource[0] = 0;
-            let ssrc = ssrcSource.readInt32BE(0, true);
+            const ssrc = ssrcSource.readInt32BE(0, true);
 
             response.audio = {
                 port: request.audio.port,
@@ -457,14 +480,11 @@ class KinesisStreamingDelegate {
             };
 
             sessionInfo.audio_port = request.audio.port;
-            sessionInfo.audio_srtp = Buffer.concat([
-                request.audio.srtp_key,
-                request.audio.srtp_salt
-            ]);
+            sessionInfo.audio_srtp = Buffer.concat([request.audio.srtp_key, request.audio.srtp_salt]);
             sessionInfo.audio_ssrc = ssrc;
         }
 
-        let myIPAddress = ip.address();
+        const myIPAddress = ip.address();
         response.address = {
             address: myIPAddress,
             type: ip.isV4Format(myIPAddress) ? 'v4' : 'v6'
@@ -521,12 +541,10 @@ class KinesisStreamingDelegate {
             }
 
             delete this.pendingSessions[sessionIdentifier];
-
         } else if (request.type === 'stop') {
             this.log(`[KinesisDelegate] Stopping stream session ${shortId}...`);
             await this._stopKinesisStream(sessionIdentifier);
             callback();
-
         } else if (request.type === 'reconfigure') {
             if (this.ss3Camera.debug) {
                 this.log(`[KinesisDelegate] Reconfigure request for ${shortId} (ignored)`);
@@ -544,7 +562,9 @@ class KinesisStreamingDelegate {
         const locationId = subscription.sid;
 
         if (this.ss3Camera.debug) {
-            this.log(`[KinesisDelegate] Establishing WebRTC for session ${shortId}: location=${locationId} camera=${this.cameraDetails.uuid}`);
+            this.log(
+                `[KinesisDelegate] Establishing WebRTC for session ${shortId}: location=${locationId} camera=${this.cameraDetails.uuid}`
+            );
         }
 
         // Create Kinesis session - use full UUID from cameraDetails
@@ -553,11 +573,11 @@ class KinesisStreamingDelegate {
         const webrtcTime = Date.now() - startTime;
         this.log(`[KinesisDelegate] WebRTC connected in ${webrtcTime}ms, starting FFmpeg pipeline`);
 
-        let width = request.video.width ?? 1920;
-        let height = request.video.height ?? 1080;
+        const width = request.video.width ?? 1920;
+        const height = request.video.height ?? 1080;
         let fps = this.cameraDetails.cameraSettings?.admin?.fps || 30;
         let videoBitrate = this.cameraDetails.cameraSettings?.admin?.bitRate || 2000;
-        let mtu = request.video.mtu ?? 1316;
+        const mtu = request.video.mtu ?? 1316;
 
         if (request.video.fps < fps) {
             fps = request.video.fps;
@@ -567,40 +587,67 @@ class KinesisStreamingDelegate {
         }
 
         if (this.ss3Camera.debug) {
-            this.log(`[KinesisDelegate] Stream: ${width}x${height}@${fps}fps bitrate=${videoBitrate}kbps mtu=${mtu} -> srtp://${sessionInfo.address}:${sessionInfo.video_port}`);
+            this.log(
+                `[KinesisDelegate] Stream: ${width}x${height}@${fps}fps bitrate=${videoBitrate}kbps mtu=${mtu} -> srtp://${sessionInfo.address}:${sessionInfo.video_port}`
+            );
         }
 
         // Build FFmpeg command for processing WebRTC -> HomeKit SRTP
         const ffmpegArgs = [
             // Input from pipe (H.264 Annex B stream)
-            '-f', 'h264',
-            '-err_detect', 'ignore_err',      // Tolerate some decode errors
-            '-i', 'pipe:0',
+            '-f',
+            'h264',
+            '-err_detect',
+            'ignore_err', // Tolerate some decode errors
+            '-i',
+            'pipe:0',
 
             // Video output
-            '-map', '0:v',
-            '-vcodec', 'libx264',
-            '-tune', 'zerolatency',
-            '-preset', 'superfast',
-            '-pix_fmt', 'yuv420p',
-            '-r', String(fps),
-            '-vf', `scale=${width}:${height}`,
-            '-b:v', `${videoBitrate}k`,
-            '-bufsize', `${2 * videoBitrate}k`,
-            '-maxrate', `${videoBitrate}k`,
-            '-payload_type', '99',
-            '-ssrc', String(sessionInfo.video_ssrc),
-            '-f', 'rtp',
-            '-srtp_out_suite', 'AES_CM_128_HMAC_SHA1_80',
-            '-srtp_out_params', sessionInfo.video_srtp.toString('base64'),
+            '-map',
+            '0:v',
+            '-vcodec',
+            'libx264',
+            '-tune',
+            'zerolatency',
+            '-preset',
+            'superfast',
+            '-pix_fmt',
+            'yuv420p',
+            '-r',
+            String(fps),
+            '-vf',
+            `scale=${width}:${height}`,
+            '-b:v',
+            `${videoBitrate}k`,
+            '-bufsize',
+            `${2 * videoBitrate}k`,
+            '-maxrate',
+            `${videoBitrate}k`,
+            '-payload_type',
+            '99',
+            '-ssrc',
+            String(sessionInfo.video_ssrc),
+            '-f',
+            'rtp',
+            '-srtp_out_suite',
+            'AES_CM_128_HMAC_SHA1_80',
+            '-srtp_out_params',
+            sessionInfo.video_srtp.toString('base64'),
             `srtp://${sessionInfo.address}:${sessionInfo.video_port}?rtcpport=${sessionInfo.video_port}&localrtcpport=${sessionInfo.video_port}&pkt_size=${mtu}`
         ];
 
         // Apply custom video options if provided
         if (this.cameraOptions?.videoOptions) {
-            let options = (typeof this.cameraOptions.videoOptions === 'string')
-                ? Object.fromEntries(this.cameraOptions.videoOptions.split('-').filter(x => x).map(arg => '-' + arg).map(a => a.split(' ').filter(x => x)))
-                : this.cameraOptions.videoOptions;
+            const options =
+                typeof this.cameraOptions.videoOptions === 'string'
+                    ? Object.fromEntries(
+                          this.cameraOptions.videoOptions
+                              .split('-')
+                              .filter((x) => x)
+                              .map((arg) => `-${arg}`)
+                              .map((a) => a.split(' ').filter((x) => x))
+                      )
+                    : this.cameraOptions.videoOptions;
             if (this.ss3Camera.debug) {
                 this.log(`[KinesisDelegate] Custom video options: ${JSON.stringify(options)}`);
             }
@@ -629,7 +676,9 @@ class KinesisStreamingDelegate {
                     const totalKB = Math.round(rtpByteCount / 1024);
 
                     if (this.ss3Camera.debug) {
-                        this.log(`[KinesisDelegate] Stream stats: ${rtpPacketCount} packets (${packetsPerSecond}/s), ${totalKB}KB total`);
+                        this.log(
+                            `[KinesisDelegate] Stream stats: ${rtpPacketCount} packets (${packetsPerSecond}/s), ${totalKB}KB total`
+                        );
                     }
 
                     lastStatsTime = Date.now();
@@ -640,7 +689,7 @@ class KinesisStreamingDelegate {
             let started = false;
             let ffmpegOutput = '';
 
-            ffmpeg.stderr.on('data', data => {
+            ffmpeg.stderr.on('data', (data) => {
                 const output = data.toString();
                 ffmpegOutput += output;
 
@@ -652,14 +701,16 @@ class KinesisStreamingDelegate {
                 if (!started) {
                     started = true;
                     const totalTime = Date.now() - startTime;
-                    this.log(`[KinesisDelegate] Stream started for session ${shortId} (total: ${totalTime}ms, WebRTC: ${webrtcTime}ms)`);
+                    this.log(
+                        `[KinesisDelegate] Stream started for session ${shortId} (total: ${totalTime}ms, WebRTC: ${webrtcTime}ms)`
+                    );
                     callback();
                 }
 
                 if (this.ss3Camera.debug) {
                     // Log FFmpeg output but filter out repetitive frame info
-                    const lines = output.split('\n').filter(l => l.trim() && !l.includes('frame='));
-                    lines.forEach(line => {
+                    const lines = output.split('\n').filter((l) => l.trim() && !l.includes('frame='));
+                    lines.forEach((line) => {
                         if (line.trim()) {
                             this.log(`[KinesisDelegate] FFmpeg: ${line.trim()}`);
                         }
@@ -667,7 +718,7 @@ class KinesisStreamingDelegate {
                 }
             });
 
-            ffmpeg.on('error', err => {
+            ffmpeg.on('error', (err) => {
                 clearInterval(statsInterval);
                 this.log.error(`[KinesisDelegate] FFmpeg error for session ${shortId}: ${err.message}`);
                 if (!started) {
@@ -675,15 +726,23 @@ class KinesisStreamingDelegate {
                 }
             });
 
-            ffmpeg.on('close', code => {
+            ffmpeg.on('close', (code) => {
                 clearInterval(statsInterval);
                 const duration = Math.round((Date.now() - startTime) / 1000);
 
                 if (code === null || code === 0 || code === 255) {
-                    this.log(`[KinesisDelegate] Stream ended for session ${shortId} (duration: ${duration}s, packets: ${rtpPacketCount})`);
+                    this.log(
+                        `[KinesisDelegate] Stream ended for session ${shortId} (duration: ${duration}s, packets: ${rtpPacketCount})`
+                    );
                 } else {
-                    const lastOutput = ffmpegOutput.split('\n').filter(l => l.trim()).slice(-3).join(' | ');
-                    this.log.error(`[KinesisDelegate] FFmpeg exited code=${code} session=${shortId} duration=${duration}s packets=${rtpPacketCount} output="${lastOutput}"`);
+                    const lastOutput = ffmpegOutput
+                        .split('\n')
+                        .filter((l) => l.trim())
+                        .slice(-3)
+                        .join(' | ');
+                    this.log.error(
+                        `[KinesisDelegate] FFmpeg exited code=${code} session=${shortId} duration=${duration}s packets=${rtpPacketCount} output="${lastOutput}"`
+                    );
 
                     if (!started) {
                         callback(new Error(`FFmpeg exited with code ${code}`));
@@ -737,9 +796,10 @@ class KinesisStreamingDelegate {
                 this.log.error('[KinesisDelegate] No video track available from Kinesis session');
                 throw new Error('No video track available from Kinesis');
             }
-
         } catch (e) {
-            this.log.error(`[KinesisDelegate] Failed to start FFmpeg: ${e.message} (path: ${this.ss3Camera.ffmpegPath})`);
+            this.log.error(
+                `[KinesisDelegate] Failed to start FFmpeg: ${e.message} (path: ${this.ss3Camera.ffmpegPath})`
+            );
             this.kinesisClient.closeSession(kinesisSession);
             throw e;
         }
@@ -777,7 +837,7 @@ class KinesisStreamingDelegate {
                 setTimeout(() => {
                     try {
                         session.ffmpeg.kill('SIGKILL');
-                    } catch (e) {
+                    } catch (_e) {
                         // Already dead
                     }
                 }, 2000);

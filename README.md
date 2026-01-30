@@ -3,8 +3,10 @@
 # Homebridge SimpliSafe 3 (WebRTC Fork)
 
 [![GitHub Release](https://img.shields.io/github/v/release/cameronsjo/homebridge-simplisafe3?style=flat-square)](https://github.com/cameronsjo/homebridge-simplisafe3/releases)
-[![GitHub Last Commit](https://img.shields.io/github/last-commit/cameronsjo/homebridge-simplisafe3?style=flat-square)](https://github.com/cameronsjo/homebridge-simplisafe3/commits/master)
+[![GitHub Last Commit](https://img.shields.io/github/last-commit/cameronsjo/homebridge-simplisafe3?style=flat-square)](https://github.com/cameronsjo/homebridge-simplisafe3/commits/main)
 [![License](https://img.shields.io/github/license/cameronsjo/homebridge-simplisafe3?style=flat-square)](LICENSE)
+[![Biome](https://img.shields.io/badge/code%20style-biome-60a5fa?style=flat-square)](https://biomejs.dev)
+[![mise](https://img.shields.io/badge/mise-enabled-blue?style=flat-square)](https://mise.jdx.dev)
 
 A fork of [homebridge-simplisafe3](https://github.com/homebridge-simplisafe3/homebridge-simplisafe3) with **native WebRTC support for outdoor cameras**.
 

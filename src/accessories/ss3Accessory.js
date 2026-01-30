@@ -1,7 +1,7 @@
 class SimpliSafe3Accessory {
     services = [];
 
-    constructor (name, id, log, debug, simplisafe, api) {
+    constructor(name, id, log, debug, simplisafe, api) {
         this.id = id;
         this.log = log;
         this.debug = debug;
@@ -17,7 +17,7 @@ class SimpliSafe3Accessory {
     }
 
     createAccessory() {
-        let newAccessory = new this.api.platformAccessory(this.name, this.uuid);
+        const newAccessory = new this.api.platformAccessory(this.name, this.uuid);
         this.setupServices(newAccessory);
         this.setAccessory(newAccessory);
         return newAccessory;
@@ -25,11 +25,11 @@ class SimpliSafe3Accessory {
 
     setAccessory(accessory) {
         this.accessory = accessory;
-        this.accessory.on('identify', (paired, callback) => this.identify(callback));
+        this.accessory.on('identify', (_paired, callback) => this.identify(callback));
     }
 
     setupServices(accessory) {
-        for (let service of this.services) {
+        for (const service of this.services) {
             accessory.addService(service);
         }
     }
