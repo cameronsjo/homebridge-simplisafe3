@@ -6,6 +6,7 @@ import path from 'node:path';
 import ip from 'ip';
 
 import KinesisClient from './kinesisClient';
+import RtpReorderBuffer from './rtpReorderBuffer';
 
 const unsupportedCameraImage = path.resolve(__dirname, '..', 'images', 'unsupportedcamera_snapshot.png');
 const unsupportedCameraImageInBytes = fs.readFileSync(unsupportedCameraImage);
@@ -26,7 +27,8 @@ const NAL_TYPE_PPS = 8; // Picture parameter set
  * Waits for keyframe before emitting data to ensure clean decode start
  */
 class H264Depacketizer {
-    constructor() {
+    constructor(log = null) {
+        this.log = log;
         this.fuBuffer = null; // Buffer for FU-A fragment reassembly
         this.fuNri = 0;
         this.fuType = 0;
@@ -36,6 +38,10 @@ class H264Depacketizer {
         this.pps = null; // Cached PPS NAL
         this.synced = false; // True once we've seen SPS+PPS+IDR
         this.waitingForKeyframe = true;
+
+        // Diagnostics
+        this.nalTypeCounts = {};
+        this.packetsProcessed = 0;
     }
 
     /**
@@ -46,9 +52,13 @@ class H264Depacketizer {
     depacketize(payload) {
         if (!payload || payload.length < 1) return null;
 
+        this.packetsProcessed++;
         const nalHeader = payload[0];
         const nalType = nalHeader & 0x1f;
         const nri = nalHeader & 0x60;
+
+        // Track NAL type for diagnostics
+        this.nalTypeCounts[nalType] = (this.nalTypeCounts[nalType] || 0) + 1;
 
         // Single NAL unit (types 1-23)
         if (nalType >= 1 && nalType <= 23) {
@@ -67,6 +77,24 @@ class H264Depacketizer {
 
         // Unsupported types (STAP-B=25, MTAP16=26, MTAP24=27, FU-B=29)
         return null;
+    }
+
+    /**
+     * Get diagnostic summary of NAL types seen
+     */
+    getDiagnostics() {
+        const typeNames = {
+            1: 'P-slice', 5: 'IDR', 6: 'SEI', 7: 'SPS', 8: 'PPS',
+            24: 'STAP-A', 28: 'FU-A'
+        };
+        const summary = Object.entries(this.nalTypeCounts)
+            .map(([type, count]) => {
+                // Handle FU(x) keys for fragmented NAL types
+                if (String(type).startsWith('FU(')) return `${type}:${count}`;
+                return `${typeNames[type] || `type${type}`}:${count}`;
+            })
+            .join(' ');
+        return `packets=${this.packetsProcessed} synced=${this.synced} sps=${!!this.sps} pps=${!!this.pps} [${summary}]`;
     }
 
     _processNal(nalType, annexBData) {
@@ -140,6 +168,9 @@ class H264Depacketizer {
             this.fuNri = nri;
             this.fuType = nalType;
             this.fuBuffer = [fragmentData];
+            // Track underlying NAL type in FU-A packets
+            const fuKey = `FU(${nalType})`;
+            this.nalTypeCounts[fuKey] = (this.nalTypeCounts[fuKey] || 0) + 1;
             return null;
         }
 
@@ -371,15 +402,17 @@ class KinesisStreamingDelegate {
 
                 ffmpeg.on('close', (code) => {
                     clearTimeout(timeout);
+                    const diagnostics = depacketizer.getDiagnostics();
                     if (this.ss3Camera.debug) {
                         this.log(
                             `[KinesisDelegate] Snapshot FFmpeg closed (code: ${code}, packets: ${rtpPacketCount}, NALs: ${nalCount}, bytes: ${bytesWritten})`
                         );
+                        this.log(`[KinesisDelegate] Depacketizer: ${diagnostics}`);
                     }
                     if (code === 0 && chunks.length > 0) {
                         resolve(Buffer.concat(chunks));
                     } else {
-                        reject(new Error(`FFmpeg snapshot exited with code ${code} (packets: ${rtpPacketCount})`));
+                        reject(new Error(`FFmpeg snapshot exited with code ${code} (packets: ${rtpPacketCount}, ${diagnostics})`));
                     }
                 });
 
@@ -390,41 +423,64 @@ class KinesisStreamingDelegate {
                 });
 
                 // Write depacketized H264 NAL units to FFmpeg
-                const maxPackets = 300; // ~10 seconds of RTP packets
+                // Outdoor cameras can take 5-10s to send first keyframe after wake
+                const maxPackets = 600; // ~20 seconds of RTP packets
+                let loggedWaiting = false;
 
-                session.videoTrack.onReceiveRtp.subscribe((rtp) => {
-                    if (rtpPacketCount < maxPackets) {
-                        try {
-                            const annexB = depacketizer.depacketize(rtp.payload);
-                            if (annexB) {
-                                ffmpeg.stdin.write(annexB);
-                                bytesWritten += annexB.length;
-                                nalCount++;
-                                // Close input after we have some NAL units
-                                if (nalCount >= 30) {
-                                    if (this.ss3Camera.debug) {
-                                        this.log(`[KinesisDelegate] Snapshot reached ${nalCount} NALs, closing input`);
+                // Create reorder buffer to handle out-of-order UDP packets
+                const reorderBuffer = new RtpReorderBuffer({
+                    maxBufferSize: 30,
+                    maxWaitMs: 50,
+                    log: this.ss3Camera.debug ? this.log.bind(this) : null,
+                    onPacket: (rtp) => {
+                        if (rtpPacketCount < maxPackets) {
+                            try {
+                                const annexB = depacketizer.depacketize(rtp.payload);
+                                if (annexB) {
+                                    ffmpeg.stdin.write(annexB);
+                                    bytesWritten += annexB.length;
+                                    nalCount++;
+                                    // Close input after we have some NAL units
+                                    if (nalCount >= 30) {
+                                        if (this.ss3Camera.debug) {
+                                            this.log(`[KinesisDelegate] Snapshot reached ${nalCount} NALs, closing input`);
+                                        }
+                                        reorderBuffer.destroy();
+                                        ffmpeg.stdin.end();
                                     }
-                                    ffmpeg.stdin.end();
+                                } else if (!loggedWaiting && rtpPacketCount > 0 && rtpPacketCount % 100 === 0) {
+                                    // Log waiting status every 100 packets
+                                    loggedWaiting = true;
+                                    if (this.ss3Camera.debug) {
+                                        this.log(`[KinesisDelegate] Waiting for keyframe... ${depacketizer.getDiagnostics()}`);
+                                    }
                                 }
+                                rtpPacketCount++;
+                            } catch (_e) {
+                                // Stream ended
                             }
-                            rtpPacketCount++;
-                        } catch (_e) {
-                            // Stream ended
                         }
                     }
                 });
 
-                // Backup timeout to end the capture
+                session.videoTrack.onReceiveRtp.subscribe((rtp) => {
+                    reorderBuffer.push(rtp);
+                });
+
+                // Backup timeout to end the capture (extended for slow outdoor cameras)
                 setTimeout(() => {
-                    if (rtpPacketCount > 0) {
-                        try {
-                            ffmpeg.stdin.end();
-                        } catch (_e) {
-                            // Already ended
-                        }
+                    if (rtpPacketCount > 0 && nalCount === 0) {
+                        // No keyframe received - log diagnostics before closing
+                        this.log.warn(`[KinesisDelegate] Snapshot timeout without keyframe: ${depacketizer.getDiagnostics()} | ${reorderBuffer.getStatsString()}`);
                     }
-                }, 3000);
+                    try {
+                        reorderBuffer.flush();
+                        reorderBuffer.destroy();
+                        ffmpeg.stdin.end();
+                    } catch (_e) {
+                        // Already ended
+                    }
+                }, 8000); // Extended from 3s to 8s for camera wake time
             });
         } finally {
             if (session) {
@@ -752,15 +808,8 @@ class KinesisStreamingDelegate {
                 }
             });
 
-            // Store session info for cleanup
-            this.ongoingSessions[sessionIdentifier] = {
-                ffmpeg: ffmpeg,
-                kinesisSession: kinesisSession,
-                statsInterval: statsInterval,
-                startTime: startTime
-            };
-
             // Pipe video RTP packets from Kinesis to FFmpeg
+            let reorderBuffer = null;
             if (kinesisSession.videoTrack) {
                 if (this.ss3Camera.debug) {
                     this.log('[KinesisDelegate] Subscribing to video track RTP packets');
@@ -770,32 +819,51 @@ class KinesisStreamingDelegate {
                 const depacketizer = new H264Depacketizer();
                 let nalCount = 0;
 
-                kinesisSession.videoTrack.onReceiveRtp.subscribe((rtp) => {
-                    try {
-                        // Depacketize RTP H264 to Annex B NAL units
-                        const annexB = depacketizer.depacketize(rtp.payload);
-                        if (annexB) {
-                            ffmpeg.stdin.write(annexB);
-                            nalCount++;
-                            rtpByteCount += annexB.length;
-                        }
-                        rtpPacketCount++;
+                // Create reorder buffer to handle out-of-order UDP packets
+                reorderBuffer = new RtpReorderBuffer({
+                    maxBufferSize: 30,
+                    maxWaitMs: 50,
+                    log: this.ss3Camera.debug ? this.log.bind(this) : null,
+                    onPacket: (rtp) => {
+                        try {
+                            // Depacketize RTP H264 to Annex B NAL units
+                            const annexB = depacketizer.depacketize(rtp.payload);
+                            if (annexB) {
+                                ffmpeg.stdin.write(annexB);
+                                nalCount++;
+                                rtpByteCount += annexB.length;
+                            }
+                            rtpPacketCount++;
 
-                        // Log first NAL unit
-                        if (nalCount === 1 && this.ss3Camera.debug) {
-                            this.log(`[KinesisDelegate] First NAL unit written (${annexB.length} bytes)`);
-                        }
-                    } catch (e) {
-                        // Stream ended - this is normal when stopping
-                        if (this.ss3Camera.debug && rtpPacketCount < 10) {
-                            this.log(`[KinesisDelegate] RTP write error after ${rtpPacketCount} packets: ${e.message}`);
+                            // Log first NAL unit
+                            if (nalCount === 1 && this.ss3Camera.debug) {
+                                this.log(`[KinesisDelegate] First NAL unit written (${annexB.length} bytes)`);
+                            }
+                        } catch (e) {
+                            // Stream ended - this is normal when stopping
+                            if (this.ss3Camera.debug && rtpPacketCount < 10) {
+                                this.log(`[KinesisDelegate] RTP write error after ${rtpPacketCount} packets: ${e.message}`);
+                            }
                         }
                     }
+                });
+
+                kinesisSession.videoTrack.onReceiveRtp.subscribe((rtp) => {
+                    reorderBuffer.push(rtp);
                 });
             } else {
                 this.log.error('[KinesisDelegate] No video track available from Kinesis session');
                 throw new Error('No video track available from Kinesis');
             }
+
+            // Store session info for cleanup
+            this.ongoingSessions[sessionIdentifier] = {
+                ffmpeg: ffmpeg,
+                kinesisSession: kinesisSession,
+                reorderBuffer: reorderBuffer,
+                statsInterval: statsInterval,
+                startTime: startTime
+            };
         } catch (e) {
             this.log.error(
                 `[KinesisDelegate] Failed to start FFmpeg: ${e.message} (path: ${this.ss3Camera.ffmpegPath})`
@@ -822,6 +890,14 @@ class KinesisStreamingDelegate {
         // Clear stats interval
         if (session.statsInterval) {
             clearInterval(session.statsInterval);
+        }
+
+        // Clean up reorder buffer
+        if (session.reorderBuffer) {
+            if (this.ss3Camera.debug) {
+                this.log(`[KinesisDelegate] Reorder stats: ${session.reorderBuffer.getStatsString()}`);
+            }
+            session.reorderBuffer.destroy();
         }
 
         // Stop FFmpeg
