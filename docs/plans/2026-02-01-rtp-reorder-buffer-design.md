@@ -118,3 +118,39 @@ function seqBefore(seqA, seqB) {
 ## Rollback Plan
 
 The buffer can be bypassed by setting `maxWaitMs: 0` which effectively disables reordering and passes packets straight through.
+
+---
+
+## Implementation Notes (2026-02-01)
+
+### What We Found
+
+Testing on the Garage camera revealed **actual packet loss**, not just reordering:
+
+```
+[RtpReorder] Skipping 4 missing packets (79 -> 83)
+[RtpReorder] Skipping 42 missing packets (197 -> 239)  <- huge gap
+[RtpReorder] Skipping 31 missing packets (294 -> 325)
+```
+
+The reorder buffer correctly detects and reports these gaps, but cannot recover packets that never arrived.
+
+### Root Cause
+
+Wi-Fi signal issues at the Garage camera location. Evidence:
+- LiveKit camera (different location) works fine: 3130ms, 28KB snapshot
+- Kinesis camera has connection instability: timeouts, disconnects
+- Camera is plugged in (not battery throttling)
+
+### Current State
+
+- **Reorder buffer**: Implemented and working
+- **Video quality**: Still glitchy due to packet loss (FFmpeg concealment active)
+- **Snapshots**: Working but slow (~22s due to retries and error recovery)
+
+### Future Improvements
+
+If Wi-Fi signal improves or camera is relocated:
+1. Reorder buffer should reduce/eliminate glitches
+2. Consider adding packet loss metrics to monitor signal quality
+3. Could add adaptive bitrate hints if SimpliSafe API supports it
