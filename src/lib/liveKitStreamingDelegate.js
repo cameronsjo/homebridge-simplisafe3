@@ -166,8 +166,8 @@ class LiveKitStreamingDelegate {
 
         return new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
-                reject(new Error('Snapshot timeout - no frame received within 15s'));
-            }, 15000);
+                reject(new Error('Snapshot timeout - no frame received within 30s'));
+            }, 30000);
 
             const room = new Room();
             let resolved = false;
