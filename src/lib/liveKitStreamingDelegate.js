@@ -178,13 +178,19 @@ class LiveKitStreamingDelegate {
                 try {
                     const videoStream = new VideoStream(track);
 
-                    // Get first frame
+                    // Get first usable frame (skip tiny initialization frames)
                     for await (const event of videoStream) {
                         if (resolved) break;
 
                         const frame = event.frame;
                         if (this.ss3Camera.debug) {
                             this.log(`[LiveKitDelegate] Snapshot frame: ${frame.width}x${frame.height}`);
+                        }
+
+                        // LiveKit may emit tiny placeholder frames (e.g. 2x2) during
+                        // WebRTC negotiation before real video arrives. Skip them.
+                        if (frame.width < 100 || frame.height < 100) {
+                            continue;
                         }
 
                         // Convert frame to JPEG using FFmpeg
