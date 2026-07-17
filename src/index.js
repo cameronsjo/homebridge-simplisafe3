@@ -8,11 +8,14 @@ import MotionSensor from './accessories/motionSensor';
 import SmokeDetector from './accessories/smokeDetector';
 import UnreachableAccessory from './accessories/unreachableAccessory';
 import WaterSensor from './accessories/waterSensor';
-import SimpliSafe3AuthenticationManager from './lib/authManager';
+import SimpliSafe3AuthenticationManager, { AUTH_EVENTS } from './lib/authManager';
 import SimpliSafe3, { RateLimitError, SENSOR_TYPES } from './simplisafe';
 
 const PLUGIN_NAME = 'homebridge-simplisafe3';
 const PLATFORM_NAME = 'SimpliSafe 3';
+
+const INITIAL_STARTUP_RETRY_DELAY = 30 * 1000;
+const MAX_STARTUP_RETRY_DELAY = 5 * 60 * 1000;
 
 let UUIDGen;
 
@@ -31,6 +34,11 @@ class SS3Platform {
 
         this.cachedAccessoryConfig = [];
         this.unreachableAccessories = [];
+
+        this.startupRetryPending = false;
+        this.retryInProgress = false;
+        this.startupRetryDelay = INITIAL_STARTUP_RETRY_DELAY;
+        this.initRetryTimerID = null;
 
         let refreshInterval = 15000;
         if (config.sensorRefresh) {
@@ -57,20 +65,36 @@ class SS3Platform {
             this.authManager.password = config.auth.password;
         }
 
+        // If initialization is still pending when credentials recover (driven by the
+        // cached alarm's refresh loop, which keeps running through outages), re-run it.
+        this.authManager.on(AUTH_EVENTS.REFRESH_CREDENTIALS_SUCCESS, () => {
+            if (this.startupRetryPending && !this.retryInProgress) {
+                if (this.debug) this.log('Credentials recovered with initialization pending, retrying');
+                this.retryBlockedAccessories();
+            }
+        });
+
         this.initialLoad = this.authManager
             .refreshCredentials()
             .then(() => {
                 return this.discoverSimpliSafeDevices();
             })
             .catch((err) => {
-                if (err instanceof RateLimitError) {
-                    this.log.error('Initial load failed due to rate limiting or connectivity, trying again later');
-                    setTimeout(async () => {
-                        await this.retryBlockedAccessories();
-                    }, this.simplisafe.nextAttempt - Date.now());
-                } else {
+                const errClass = this._classifyInitError(err);
+                if (errClass === 'fatal') {
                     this.log.error('SimpliSafe login failed with error:', err.toJSON ? err.toJSON() : err);
                     this.log.error('See the plugin README for more information on authenticating with SimpliSafe.');
+                } else {
+                    this.startupRetryPending = true;
+                    if (errClass === 'ratelimit') {
+                        this.log.error('Initial load failed due to rate limiting, trying again later');
+                    } else {
+                        this.log.error(
+                            'Initial load failed due to a connectivity problem, retrying until it succeeds:',
+                            err.message ?? err
+                        );
+                    }
+                    this._scheduleInitRetry(errClass);
                 }
             });
 
@@ -82,8 +106,13 @@ class SS3Platform {
                     return Promise.all(this.cachedAccessoryConfig);
                 })
                 .then(() => {
-                    if (!this.authManager.isAuthenticated()) throw new Error('Not authenticated with SimpliSafe.');
-                    else {
+                    if (!this.authManager.isAuthenticated()) {
+                        if (this.startupRetryPending) {
+                            this.log.warn('SimpliSafe initialization deferred pending connectivity, retrying automatically.');
+                            return;
+                        }
+                        throw new Error('Not authenticated with SimpliSafe.');
+                    } else {
                         this.simplisafe.startListening();
                         this.createNewPlatformAccessories();
                     }
@@ -98,7 +127,13 @@ class SS3Platform {
         const config = new Promise((resolve, reject) => {
             this.initialLoad
                 .then(() => {
-                    if (this.simplisafe.isBlocked) {
+                    const isAlarmAccessory = accessory.services.find(
+                        (s) => s.UUID === this.api.hap.Service.SecuritySystem.UUID
+                    );
+                    // The alarm is exempt from the unreachable wrap: the cached-alarm branch
+                    // below starts the refresh loop that drives credential recovery, and a
+                    // faulted-but-live alarm tile beats "not responding" during an outage.
+                    if ((this.simplisafe.isBlocked || this.startupRetryPending) && !isAlarmAccessory) {
                         const unreachableAccessory = new UnreachableAccessory(accessory, this.api);
                         this.unreachableAccessories.push(unreachableAccessory);
 
@@ -184,9 +219,8 @@ class SS3Platform {
             const subscription = await this.simplisafe.getSubscription();
             if (subscription.location.system.serial == null) throw new Error('System serial not found.');
             const uuid = UUIDGen.generate(subscription.location.system.serial);
-            const alarm = this.accessories.find((acc) => acc.UUID === uuid);
 
-            if (!alarm) {
+            if (!this._deviceConfigured(uuid)) {
                 const alarmAccessory = new Alarm(
                     'SimpliSafe 3',
                     subscription.location.system.serial,
@@ -217,7 +251,7 @@ class SS3Platform {
                 }
 
                 const uuid = UUIDGen.generate(sensor.serial);
-                const accessory = this.accessories.find((acc) => acc.UUID === uuid);
+                const alreadyConfigured = this._deviceConfigured(uuid);
                 let sensorName = sensor.name;
                 if (this.debug) {
                     this.log(`Discovered sensor '${sensor.name}' from SimpliSafe:`, JSON.stringify(sensor));
@@ -229,7 +263,7 @@ class SS3Platform {
                 }
 
                 if (sensor.type === SENSOR_TYPES.ENTRY_SENSOR) {
-                    if (!accessory) {
+                    if (!alreadyConfigured) {
                         sensorName = sensorName || `Entry Sensor ${sensor.serial}`;
                         const sensorAccessory = new EntrySensor(
                             sensorName,
@@ -243,7 +277,7 @@ class SS3Platform {
                         this.devices.push(sensorAccessory);
                     }
                 } else if (sensor.type === SENSOR_TYPES.CO_SENSOR) {
-                    if (!accessory) {
+                    if (!alreadyConfigured) {
                         sensorName = sensorName || `CO Detector ${sensor.serial}`;
                         const sensorAccessory = new CODetector(
                             sensorName,
@@ -257,7 +291,7 @@ class SS3Platform {
                         this.devices.push(sensorAccessory);
                     }
                 } else if (sensor.type === SENSOR_TYPES.SMOKE_SENSOR) {
-                    if (!accessory) {
+                    if (!alreadyConfigured) {
                         sensorName = sensorName || `Smoke Detector ${sensor.serial}`;
                         const sensorAccessory = new SmokeDetector(
                             sensorName,
@@ -271,7 +305,7 @@ class SS3Platform {
                         this.devices.push(sensorAccessory);
                     }
                 } else if (sensor.type === SENSOR_TYPES.WATER_SENSOR) {
-                    if (!accessory) {
+                    if (!alreadyConfigured) {
                         sensorName = sensorName || `Water Sensor ${sensor.serial}`;
                         const sensorAccessory = new WaterSensor(
                             sensorName,
@@ -285,7 +319,7 @@ class SS3Platform {
                         this.devices.push(sensorAccessory);
                     }
                 } else if (sensor.type === SENSOR_TYPES.FREEZE_SENSOR) {
-                    if (!accessory) {
+                    if (!alreadyConfigured) {
                         sensorName = sensorName || `Freeze Sensor ${sensor.serial}`;
                         const sensorAccessory = new FreezeSensor(
                             sensorName,
@@ -307,7 +341,7 @@ class SS3Platform {
                         );
                         continue;
                     }
-                    if (!accessory) {
+                    if (!alreadyConfigured) {
                         const sensorAccessory = new MotionSensor(
                             sensorName,
                             sensor.serial,
@@ -334,8 +368,7 @@ class SS3Platform {
                     this.log(`Discovered door lock '${lockName}' from SimpliSafe:`, JSON.stringify(lock));
                 }
 
-                const accessory = this.accessories.find((acc) => acc.UUID === uuid);
-                if (!accessory) {
+                if (!this._deviceConfigured(uuid)) {
                     const lockAccessory = new DoorLock(
                         lockName,
                         lock.serial,
@@ -365,8 +398,7 @@ class SS3Platform {
                         continue;
                     }
 
-                    const cameraAccessory = this.accessories.find((acc) => acc.UUID === uuid);
-                    if (!cameraAccessory) {
+                    if (!this._deviceConfigured(uuid)) {
                         const cameraAccessory = new Camera(
                             cameraName,
                             camera.uuid,
@@ -409,30 +441,82 @@ class SS3Platform {
     }
 
     async retryBlockedAccessories() {
+        if (this.retryInProgress) return;
+        this.retryInProgress = true;
+        if (this.initRetryTimerID) {
+            clearTimeout(this.initRetryTimerID);
+            this.initRetryTimerID = null;
+        }
         try {
             await this.authManager.refreshCredentials();
-            if (this.debug) this.log('Recovered from 403 rate limit!');
+            if (this.debug) this.log('Credentials refreshed, re-running device discovery');
             await this.discoverSimpliSafeDevices();
+            // Clear before reconfiguring so the unreachable-wrap branch in
+            // configureAccessory doesn't re-wrap the accessories being restored
+            this.startupRetryPending = false;
             this.cachedAccessoryConfig = [];
             for (const accessory of this.unreachableAccessories) {
                 accessory.clearAccessory();
                 this.configureAccessory(accessory.accessory);
             }
             await Promise.all(this.cachedAccessoryConfig);
+            this.unreachableAccessories = [];
             this.createNewPlatformAccessories();
+            // No-op if the socket already came up during a normal boot
+            await this.simplisafe.startListening();
+            this.startupRetryDelay = INITIAL_STARTUP_RETRY_DELAY;
+            this.log.info('SimpliSafe initialization recovered.');
         } catch (err) {
-            if (err instanceof RateLimitError) {
-                this.log.error('Credentials refresh attempt failed, still rate limited');
-                setTimeout(async () => {
-                    await this.retryBlockedAccessories();
-                }, this.simplisafe.nextAttempt - Date.now());
-            } else {
+            const errClass = this._classifyInitError(err);
+            if (errClass === 'fatal') {
+                // Leave startupRetryPending set: the cached alarm's refresh loop keeps
+                // polling credentials, and its next success (e.g. after a re-auth through
+                // the UI rewrites the accounts file) re-triggers this retry via the
+                // REFRESH_CREDENTIALS_SUCCESS listener
                 this.log.error(
                     'An error occurred while refreshing credentials again:',
                     err.toJSON ? err.toJSON() : err
                 );
+            } else {
+                if (errClass === 'ratelimit') {
+                    this.log.error('Credentials refresh attempt failed, still rate limited');
+                } else {
+                    this.log.error('Initialization retry failed due to a connectivity problem:', err.message ?? err);
+                }
+                this._scheduleInitRetry(errClass);
             }
+        } finally {
+            this.retryInProgress = false;
         }
+    }
+
+    _classifyInitError(err) {
+        if (err instanceof RateLimitError) return 'ratelimit';
+        if (err.isAxiosError && (!err.response || err.response.status >= 500)) return 'connectivity';
+        return 'fatal';
+    }
+
+    _scheduleInitRetry(errClass) {
+        if (this.initRetryTimerID) clearTimeout(this.initRetryTimerID);
+        let delay;
+        if (errClass === 'ratelimit') {
+            delay = Math.max(this.simplisafe.nextAttempt - Date.now(), 0);
+        } else {
+            delay = this.startupRetryDelay;
+            this.startupRetryDelay = Math.min(this.startupRetryDelay * 2, MAX_STARTUP_RETRY_DELAY);
+        }
+        this.log.warn(`Retrying SimpliSafe initialization in ${Math.round(delay / 1000)}s`);
+        this.initRetryTimerID = setTimeout(async () => {
+            this.initRetryTimerID = null;
+            await this.retryBlockedAccessories();
+        }, delay);
+    }
+
+    _deviceConfigured(uuid) {
+        return (
+            this.accessories.some((acc) => acc.UUID === uuid) ||
+            this.devices.some((device) => device.uuid === uuid)
+        );
     }
 }
 
