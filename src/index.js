@@ -167,8 +167,13 @@ class SS3Platform {
                                 this.api
                             );
 
+                            // Adopt the cached accessory's identity so a post-recovery
+                            // discovery pass reuses this device instead of creating a
+                            // duplicate alarm (the placeholder serial hashes differently)
+                            alarmAccessory.uuid = accessory.UUID;
                             this.devices.push(alarmAccessory);
                             alarmAccessory.setAccessory(accessory);
+                            this.accessories.push(accessory);
                             alarmAccessory.setFault();
                         } else {
                             this.removeAccessory(accessory);
