@@ -1,10 +1,13 @@
 /**
  * H.264 encoder resolution for camera streaming pipelines.
  *
- * Prefers the Raspberry Pi's hardware encoder (h264_v4l2m2m) when a probe
- * confirms it actually works - being listed in `ffmpeg -encoders` is not
- * enough, the V4L2 device must exist and accept a test encode. Falls back
- * to software libx264 everywhere else (including dev machines).
+ * Software libx264 is the default. The Pi 4's hardware encoder
+ * (h264_v4l2m2m) is opt-in only (cameraOptions.useHardwareEncoder):
+ * on 2026-07-18 a second concurrent HomeKit stream triggered a kernel
+ * NULL-deref Oops in bcm2835_codec (vchiq_mmal_port_enable, kernel
+ * 6.6.74-rpt) that wedged the codec device until reboot. The single-
+ * encode probe below cannot detect that concurrency bug, so it gates
+ * only the opt-in path, never a default.
  */
 
 /*global process */
@@ -15,7 +18,7 @@ const PROBE_TIMEOUT_MS = 5000;
 let resolvedEncoderPromise = null;
 
 export function resolveEncoder(ffmpegPath, cameraOptions, log) {
-    if (cameraOptions?.forceSoftwareEncoder === true) {
+    if (cameraOptions?.useHardwareEncoder !== true) {
         return Promise.resolve('libx264');
     }
 
