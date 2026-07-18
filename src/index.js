@@ -138,10 +138,13 @@ class SS3Platform {
                     const isAlarmAccessory = accessory.services.find(
                         (s) => s.UUID === this.api.hap.Service.SecuritySystem.UUID
                     );
-                    // The alarm is exempt from the unreachable wrap: the cached-alarm branch
-                    // below starts the refresh loop that drives credential recovery, and a
-                    // faulted-but-live alarm tile beats "not responding" during an outage.
-                    if ((this.simplisafe.isBlocked || this.startupRetryPending) && !isAlarmAccessory) {
+                    // On unauthenticated boots the alarm is exempt from the unreachable
+                    // wrap: the cached-alarm branch below starts the refresh loop that
+                    // drives credential recovery, and a faulted-but-live alarm tile beats
+                    // "not responding" during an outage. When auth is fine (e.g. pure
+                    // rate limit) that branch can't run, so wrap it like everything else.
+                    const alarmExempt = isAlarmAccessory && !this.authManager.isAuthenticated();
+                    if ((this.simplisafe.isBlocked || this.startupRetryPending) && !alarmExempt) {
                         const unreachableAccessory = new UnreachableAccessory(accessory, this.api);
                         this.unreachableAccessories.push(unreachableAccessory);
 
