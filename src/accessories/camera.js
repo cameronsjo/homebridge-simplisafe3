@@ -41,14 +41,19 @@ class SS3Camera extends SimpliSafe3Accessory {
         const webrtcProvider = this._getWebRTCProvider();
 
         if (webrtcProvider === 'KVS') {
+            // No camera has selected KVS since the fleet migrated to MIST
+            // (observed 2026-07); the Kinesis path is mothballed, not removed,
+            // in case SimpliSafe flips a camera's provider back.
+            this.log.warn(
+                `Camera '${name}' selected the dormant Kinesis (KVS) streaming path - this code is mothballed; if streams misbehave, SimpliSafe likely changed providers again`
+            );
             delegate = new KinesisStreamingDelegate(this);
-            if (this.debug) this.log(`Camera '${name}' using Kinesis WebRTC streaming`);
         } else if (webrtcProvider === 'MIST') {
             delegate = new LiveKitStreamingDelegate(this);
-            if (this.debug) this.log(`Camera '${name}' using LiveKit streaming`);
+            this.log(`Camera '${name}' streaming via LiveKit (MIST)`);
         } else {
             delegate = new StreamingDelegate(this);
-            if (this.debug) this.log(`Camera '${name}' using standard FLV streaming`);
+            this.log(`Camera '${name}' streaming via legacy FLV`);
         }
 
         this.controller = delegate.controller;

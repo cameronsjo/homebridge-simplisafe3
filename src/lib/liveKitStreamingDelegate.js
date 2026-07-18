@@ -30,6 +30,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Room, RoomEvent, TrackKind, VideoStream } from '@livekit/rtc-node';
 import ip from 'ip';
+import { resolveEncoder, encoderArgs } from './videoEncoder';
 
 // SimpliSafe's LiveKit server endpoint
 const LIVEKIT_URL = 'wss://livestream.services.simplisafe.com:7880';
@@ -142,35 +143,66 @@ class LiveKitStreamingDelegate {
             return;
         }
 
-        try {
-            if (this.ss3Camera.debug) {
-                this.log('[LiveKitDelegate] Cache miss, starting LiveKit session for snapshot');
+        // Two bounded attempts: a stalled LiveKit session (camera wake miss)
+        // rarely recovers within one long wait, but a fresh session usually
+        // succeeds in ~2s. 10s + 15s stays under the old single 30s budget.
+        const attemptTimeouts = [10000, 15000];
+        let lastErr = null;
+        for (let attempt = 0; attempt < attemptTimeouts.length; attempt++) {
+            try {
+                if (this.ss3Camera.debug) {
+                    this.log(
+                        `[LiveKitDelegate] ${attempt === 0 ? 'Cache miss, starting' : 'Retrying'} LiveKit session for snapshot (attempt ${attempt + 1})`
+                    );
+                }
+                const snapshot = await this._captureSnapshotFromLiveKit(
+                    request.width,
+                    request.height,
+                    attemptTimeouts[attempt]
+                );
+                this.cachedSnapshot = snapshot;
+                this.snapshotCacheTime = Date.now();
+                this.log(
+                    `[LiveKitDelegate] Snapshot captured in ${Date.now() - startTime}ms (size: ${Math.round(snapshot.length / 1024)}KB)`
+                );
+                callback(undefined, snapshot);
+                return;
+            } catch (err) {
+                lastErr = err;
             }
-            const snapshot = await this._captureSnapshotFromLiveKit(request.width, request.height);
-            this.cachedSnapshot = snapshot;
-            this.snapshotCacheTime = Date.now();
-            this.log(
-                `[LiveKitDelegate] Snapshot captured in ${Date.now() - startTime}ms (size: ${Math.round(snapshot.length / 1024)}KB)`
-            );
-            callback(undefined, snapshot);
-        } catch (err) {
-            this.log.error(
-                `[LiveKitDelegate] Snapshot capture failed after ${Date.now() - startTime}ms: ${err.message} (using placeholder)`
-            );
-            callback(undefined, unsupportedCameraImageInBytes);
         }
+
+        // A stale real frame beats the generic placeholder tile
+        if (this.cachedSnapshot) {
+            const staleAge = Math.round((Date.now() - this.snapshotCacheTime) / 1000);
+            this.log.warn(
+                `[LiveKitDelegate] Snapshot capture failed after ${Date.now() - startTime}ms: ${lastErr.message} (serving stale snapshot, age ${staleAge}s)`
+            );
+            callback(undefined, this.cachedSnapshot);
+            return;
+        }
+
+        this.log.error(
+            `[LiveKitDelegate] Snapshot capture failed after ${Date.now() - startTime}ms: ${lastErr.message} (using placeholder)`
+        );
+        callback(undefined, unsupportedCameraImageInBytes);
     }
 
-    async _captureSnapshotFromLiveKit(width, height) {
+    async _captureSnapshotFromLiveKit(width, height, timeoutMs = 30000) {
         const token = await this._getLiveKitToken();
 
         return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                reject(new Error('Snapshot timeout - no frame received within 30s'));
-            }, 30000);
-
             const room = new Room();
             let resolved = false;
+
+            const timeout = setTimeout(() => {
+                if (resolved) return;
+                resolved = true;
+                // Disconnect so a stalled session doesn't stay attached to the
+                // camera (keeps a battery camera awake) after we've given up
+                room.disconnect().catch(() => {});
+                reject(new Error(`Snapshot timeout - no frame received within ${Math.round(timeoutMs / 1000)}s`));
+            }, timeoutMs);
 
             room.on(RoomEvent.TrackSubscribed, async (track, _publication, _participant) => {
                 if (resolved || track.kind !== TrackKind.KIND_VIDEO) return;
@@ -366,24 +398,24 @@ class LiveKitStreamingDelegate {
         const shortId = sessionIdentifier.substring(0, 8);
 
         switch (request.type) {
-            case this.api.hap.StreamRequestTypes.START:
-                this.log(`[LiveKitDelegate] Starting stream session ${shortId}...`);
-                await this._startLiveKitStream(sessionIdentifier, request);
-                callback();
-                break;
+        case this.api.hap.StreamRequestTypes.START:
+            this.log(`[LiveKitDelegate] Starting stream session ${shortId}...`);
+            await this._startLiveKitStream(sessionIdentifier, request);
+            callback();
+            break;
 
-            case this.api.hap.StreamRequestTypes.RECONFIGURE:
-                if (this.ss3Camera.debug) {
-                    this.log(`[LiveKitDelegate] Reconfigure request for session ${shortId}`);
-                }
-                callback();
-                break;
+        case this.api.hap.StreamRequestTypes.RECONFIGURE:
+            if (this.ss3Camera.debug) {
+                this.log(`[LiveKitDelegate] Reconfigure request for session ${shortId}`);
+            }
+            callback();
+            break;
 
-            case this.api.hap.StreamRequestTypes.STOP:
-                this.log(`[LiveKitDelegate] Stopping stream session ${shortId}...`);
-                await this._stopLiveKitStream(sessionIdentifier);
-                callback();
-                break;
+        case this.api.hap.StreamRequestTypes.STOP:
+            this.log(`[LiveKitDelegate] Stopping stream session ${shortId}...`);
+            await this._stopLiveKitStream(sessionIdentifier);
+            callback();
+            break;
         }
     }
 
@@ -423,6 +455,9 @@ class LiveKitStreamingDelegate {
             this.log(`[LiveKitDelegate] Stream: ${width}x${height}@${fps}fps bitrate=${videoBitrate}kbps mtu=${mtu}`);
         }
 
+        // Hardware encoder when the probe confirmed one, software otherwise
+        const encoder = await resolveEncoder(this.ss3Camera.ffmpegPath, this.cameraOptions, this.log);
+
         // Build FFmpeg command - LiveKit gives us I420 (YUV420P) frames
         const ffmpegArgs = [
             '-f',
@@ -438,12 +473,7 @@ class LiveKitStreamingDelegate {
 
             '-map',
             '0:v',
-            '-vcodec',
-            'libx264',
-            '-tune',
-            'zerolatency',
-            '-preset',
-            'ultrafast',
+            ...encoderArgs(encoder),
             '-pix_fmt',
             'yuv420p',
             '-r',
@@ -477,7 +507,7 @@ class LiveKitStreamingDelegate {
 
         try {
             if (this.ss3Camera.debug) {
-                this.log(`[LiveKitDelegate] Connecting to LiveKit room...`);
+                this.log('[LiveKitDelegate] Connecting to LiveKit room...');
             }
 
             await room.connect(LIVEKIT_URL, token, { autoSubscribe: true });
