@@ -1,0 +1,17 @@
+{
+  "bridge": {
+    "name": "SS3 Harness Bridge",
+    "username": "0E:76:AB:11:22:33",
+    "port": 51899,
+    "pin": "031-45-154"
+  },
+  "platforms": [
+    {
+      "platform": "SimpliSafe 3",
+      "name": "SimpliSafe 3",
+      "cameras": true,
+      "debug": true,
+      "persistAccessories": true
+    }
+  ]
+}

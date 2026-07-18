@@ -1,0 +1,9 @@
+{
+  "name": "ss3-harness",
+  "private": true,
+  "description": "Mock-API resilience harness for homebridge-simplisafe3 (see run.js header)",
+  "dependencies": {
+    "homebridge": "1.11.2",
+    "nock": "^13"
+  }
+}
