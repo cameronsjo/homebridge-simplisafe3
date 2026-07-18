@@ -113,7 +113,15 @@ class SS3Platform {
                         }
                         throw new Error('Not authenticated with SimpliSafe.');
                     } else {
-                        this.simplisafe.startListening();
+                        // A floating rejection here (e.g. rate-limited getUserId) crashes
+                        // the whole bridge on Node >=15; the scheduled init retry restarts
+                        // the socket, so log and move on
+                        this.simplisafe.startListening().catch((err) => {
+                            this.log.error(
+                                'Failed to start SimpliSafe event listener:',
+                                err.toJSON ? err.toJSON() : err
+                            );
+                        });
                         this.createNewPlatformAccessories();
                     }
                 })
