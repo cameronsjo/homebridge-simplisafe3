@@ -117,6 +117,7 @@
     "deploy": "npm publish dist/",
     "release": "./scripts/release.sh",
     "start": "nodemon --exec babel-node src/index.js",
-    "test": "echo NO TESTS"
+    "lint": "biome lint src test/unit",
+    "test": "npm run build && node --test test/unit/*.test.js"
   }
 }
