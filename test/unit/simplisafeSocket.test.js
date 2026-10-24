@@ -1,4 +1,5 @@
 // Runs against the Babel build in dist/ (npm test builds first).
+// Needs Node >= 20.11 for the options form of mock.timers.enable().
 // Swaps the `ws` module for a fake so no socket ever leaves the process.
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -114,6 +115,24 @@ test('a rejected reconnect is caught and retried, not left floating', async (t) 
     t.mock.timers.tick(1000);
     await new Promise((r) => setImmediate(r));
     assert.equal(calls, 1);
+    assert.equal(unhandled.length, 0);
+    assert.equal(ss.isAwaitingSocketReconnect, true, 'another attempt is scheduled');
+});
+
+test('a reconnect rejected with no error object still schedules a retry', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const ss = makeClient();
+    ss.userId = undefined;
+    // request() rethrows err.response.data, which can be undefined
+    ss.getUserId = () => Promise.reject(undefined);
+    const unhandled = [];
+    const onUnhandled = (err) => unhandled.push(err);
+    process.on('unhandledRejection', onUnhandled);
+    t.after(() => process.off('unhandledRejection', onUnhandled));
+
+    ss.handleSocketConnectionFailure();
+    t.mock.timers.tick(1000);
+    await new Promise((r) => setImmediate(r));
     assert.equal(unhandled.length, 0);
     assert.equal(ss.isAwaitingSocketReconnect, true, 'another attempt is scheduled');
 });

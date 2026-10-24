@@ -644,7 +644,7 @@ class SimpliSafe3 extends EventEmitter {
             // startListening can reject (e.g. getUserId hits a rate limit); a floating
             // rejection here would crash the bridge, so log it and schedule another try
             this.startListening().catch((err) => {
-                this.log.error('SimpliSafe real time events reconnect failed:', err.message ?? err);
+                this.log.error('SimpliSafe real time events reconnect failed:', err?.message ?? err);
                 this.handleSocketConnectionFailure();
             });
         }, retryInterval);

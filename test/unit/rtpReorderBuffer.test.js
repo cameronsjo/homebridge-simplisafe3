@@ -1,4 +1,5 @@
-// Runs against the Babel build in dist/ (npm test builds first)
+// Runs against the Babel build in dist/ (npm test builds first).
+// Needs Node >= 20.11 for the options form of mock.timers.enable().
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const RtpReorderBuffer = require('../../dist/lib/rtpReorderBuffer').default;

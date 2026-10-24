@@ -221,19 +221,21 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
         };
 
         const accountsFile = path.join(this.storagePath, accountsFilename);
+        // The file holds a live refresh token for an alarm system: owner-only.
+        // `mode` applies only when the file is created, so tighten an existing file
+        // before the new token goes in. Some mounts (e.g. Docker volumes on Windows
+        // hosts) reject chmod; that is logged, not fatal, so refresh keeps working.
         try {
-            // The file holds a live refresh token for an alarm system: owner-only.
-            // `mode` applies only when the file is created, so chmod an existing one too.
+            fs.chmodSync(accountsFile, 0o600);
+        } catch (err) {
+            if (err.code !== 'ENOENT' && this.debug)
+                this.log(`Unable to restrict permissions on ${accountsFilename}: ${err.message}`);
+        }
+        try {
             fs.writeFileSync(accountsFile, JSON.stringify(account), { mode: 0o600 });
         } catch (err) {
             if (this.log?.error) this.log.error('Unable to write accounts file.', err);
             throw new Error(`Failed storing token with error message "${err.message}"`);
-        }
-        try {
-            fs.chmodSync(accountsFile, 0o600);
-        } catch (err) {
-            // Some mounts (e.g. Docker volumes on Windows hosts) reject chmod; the token is stored either way
-            if (this.debug) this.log(`Unable to restrict permissions on ${accountsFilename}: ${err.message}`);
         }
 
         if (this.refreshInterval) {
