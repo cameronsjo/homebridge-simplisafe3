@@ -87,8 +87,10 @@ class RtpReorderBuffer {
         // Store packet in buffer
         this.buffer.set(seq, rtp);
 
-        // Track if this packet arrived out of order
-        if (seq !== this.expectedSeq && this.buffer.size > 1) {
+        // A packet that fills the gap while later ones wait arrived out of order.
+        // (Counting the early packets instead missed every single swap, since the
+        // first early packet is alone in the buffer.)
+        if (seq === this.expectedSeq && this.buffer.size > 1) {
             this.stats.reordered++;
         }
 
@@ -168,6 +170,9 @@ class RtpReorderBuffer {
                 if (waitedMs >= this.maxWaitMs && this.buffer.size > 0) {
                     this._forceFlush();
                 }
+                // A second gap leaves packets behind; keep flushing rather than
+                // stranding them until the next push
+                this._scheduleFlush();
             }, this.maxWaitMs);
         }
     }
@@ -201,7 +206,10 @@ class RtpReorderBuffer {
             clearTimeout(this.flushTimer);
             this.flushTimer = null;
         }
-        this._forceFlush();
+        // _forceFlush emits one contiguous run; repeat until every gap is skipped
+        while (this.buffer.size > 0) {
+            this._forceFlush();
+        }
     }
 
     /**

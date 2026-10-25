@@ -30,6 +30,28 @@ const SS_OAUTH_DEVICE_UUID = '0000007E-0000-1000-8000-0026BB765291'; // anything
 
 const accountsFilename = 'simplisafe3auth.json';
 
+// Refresh this long before the access token expires
+const REFRESH_LEAD_MS = 5 * 60 * 1000;
+// Bounds for the preemptive refresh timer. A short or missing expires_in would
+// otherwise give a zero, negative, or NaN delay, which Node runs every 1ms; a
+// delay over 2^31-1 ms overflows to 1ms too.
+const MIN_REFRESH_INTERVAL_MS = 60 * 1000;
+const MAX_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
+
+export function refreshIntervalMs(expiresIn) {
+    const expiresMs = parseInt(expiresIn, 10) * 1000;
+    if (!Number.isFinite(expiresMs)) return MIN_REFRESH_INTERVAL_MS;
+    return Math.min(Math.max(expiresMs - REFRESH_LEAD_MS, MIN_REFRESH_INTERVAL_MS), MAX_REFRESH_INTERVAL_MS);
+}
+
+// 429 is a rate limit, not a rejected credential, so it must not wipe the tokens
+export function isAuthRejection(err) {
+    if (!err?.response) return false;
+    const status = err.response.status;
+    if (status === 429) return false;
+    return (status >= 400 && status < 500) || err.response.data === 'Unauthorized';
+}
+
 class SimpliSafe3AuthenticationManager extends events.EventEmitter {
     storagePath;
     accessToken;
@@ -39,6 +61,7 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
     codeChallenge;
     expiry;
     refreshInterval;
+    chmodWarned = false;
     log;
     debug;
 
@@ -177,10 +200,7 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
             if (this.log && this.debug) this.log('SimpliSafe credentials refresh was successful');
         } catch (err) {
             if (this.log && this.debug) this.log('SimpliSafe credentials refresh failed');
-            if (
-                err.response &&
-                (String(err.response.status).indexOf('4') === 0 || err.response.data === 'Unauthorized')
-            ) {
+            if (isAuthRejection(err)) {
                 // this is a true auth failure
                 this.refreshToken = this.accessToken = null;
                 this.emit(AUTH_EVENTS.REFRESH_CREDENTIALS_FAILURE);
@@ -201,8 +221,24 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
             refreshToken: this.refreshToken
         };
 
+        const accountsFile = path.join(this.storagePath, accountsFilename);
+        // The file holds a live refresh token for an alarm system: owner-only.
+        // `mode` applies only when the file is created, so tighten an existing file
+        // before the new token goes in. Some mounts (e.g. Docker volumes on Windows
+        // hosts) reject chmod; that is logged, not fatal, so refresh keeps working.
         try {
-            fs.writeFileSync(path.join(this.storagePath, accountsFilename), JSON.stringify(account));
+            fs.chmodSync(accountsFile, 0o600);
+        } catch (err) {
+            // Warn once, debug or not: the user should know the token file stays readable
+            if (err.code !== 'ENOENT' && !this.chmodWarned) {
+                this.chmodWarned = true;
+                const msg = `Unable to restrict ${accountsFilename} to owner-only (0600), it may be readable by other users: ${err.message}`;
+                if (this.log.warn) this.log.warn(msg);
+                else this.log(msg);
+            }
+        }
+        try {
+            fs.writeFileSync(accountsFile, JSON.stringify(account), { mode: 0o600 });
         } catch (err) {
             if (this.log?.error) this.log.error('Unable to write accounts file.', err);
             throw new Error(`Failed storing token with error message "${err.message}"`);
@@ -211,21 +247,20 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
         if (this.refreshInterval) {
             clearInterval(this.refreshInterval);
         }
-        this.refreshInterval = setInterval(
-            () => {
-                if (this.log && this.debug) this.log('Preemptively authenticating with SimpliSafe');
-                this.refreshCredentials().catch((err) => {
-                    if (this.log?.error) this.log.error(err.toJSON ? err.toJSON() : err);
-                    if (err.response && (err.response.status === 403 || err.response.data === 'Unauthorized')) {
-                        clearInterval(this.refreshInterval); // just disable until next successful one
-                    }
-                });
-            },
-            parseInt(token.expires_in, 10) * 1000 - 300000
-        );
+        this.refreshInterval = setInterval(() => {
+            if (this.log && this.debug) this.log('Preemptively authenticating with SimpliSafe');
+            this.refreshCredentials().catch((err) => {
+                if (this.log?.error) this.log.error(err.toJSON ? err.toJSON() : err);
+                if (err.response && (err.response.status === 403 || err.response.data === 'Unauthorized')) {
+                    clearInterval(this.refreshInterval); // just disable until next successful one
+                }
+            });
+        }, refreshIntervalMs(token.expires_in));
     }
 }
 
 module.exports.SimpliSafe3AuthenticationManager = SimpliSafe3AuthenticationManager;
 module.exports.AUTH_EVENTS = AUTH_EVENTS;
+module.exports.refreshIntervalMs = refreshIntervalMs;
+module.exports.isAuthRejection = isAuthRejection;
 export default SimpliSafe3AuthenticationManager;

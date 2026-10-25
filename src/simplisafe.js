@@ -68,6 +68,9 @@ const alarmRefreshInterval = 62000; // ms, avoid overlap with sensor refresh
 
 const wsUrl = 'wss://socketlink.prd.aser.simplisafe.com';
 const socketRetryInterval = 1000; //ms
+// Cap the exponential backoff. Uncapped, 2^n seconds passes setTimeout's 2^31-1 ms
+// limit at n=22, which Node treats as 1ms and turns into a tight reconnect loop.
+const socketMaxRetryInterval = 30 * 60 * 1000; //ms
 const socketHeartbeatInterval = 60 * 1000; //ms
 
 const ssApi = axios.create({
@@ -146,7 +149,7 @@ class SimpliSafe3 extends EventEmitter {
                         'Recovery credentials refresh failed with error:',
                         credentialsErr.toJSON ? credentialsErr.toJSON() : credentialsErr
                     );
-                if (credentialsErr.isAxiosError) {
+                if (credentialsErr.isAxiosError && credentialsErr.response) {
                     throw new Error(`${credentialsErr.response.status}: ${credentialsErr.response.statusText}`);
                 } else {
                     throw credentialsErr;
@@ -448,8 +451,17 @@ class SimpliSafe3 extends EventEmitter {
             this.socketIsAlive = true;
         });
 
-        this.socket.on('message', (message) => {
-            message = JSON.parse(message);
+        this.socket.on('message', (raw) => {
+            // A throw inside this listener escapes as an uncaught exception and
+            // takes down the whole bridge, so drop frames we can't parse
+            let message;
+            try {
+                message = JSON.parse(raw);
+            } catch (err) {
+                if (this.debug) this.log.warn('SSAPI socket received a non-JSON message, ignoring:', err.message);
+                return;
+            }
+            if (!message || typeof message !== 'object') return;
 
             if (this.debug && !['service', 'messagequeue'].includes(message.source))
                 this.log('SSAPI socket received message:', message);
@@ -468,7 +480,9 @@ class SimpliSafe3 extends EventEmitter {
                         this.nSocketConnectFailures = 0;
                         this.socketIsAlive = true;
 
-                        // heartbeat
+                        // heartbeat; clear any earlier one so a repeated `subscribed`
+                        // message can't leave an orphaned interval pinging a dead socket
+                        clearInterval(this.socketHeartbeatIntervalID);
                         this.socketHeartbeatIntervalID = setInterval(
                             () => {
                                 if (!this.socketIsAlive) {
@@ -477,7 +491,7 @@ class SimpliSafe3 extends EventEmitter {
                                     return;
                                 } else {
                                     this.socketIsAlive = false;
-                                    this.socket.ping();
+                                    this.socket?.ping();
                                 }
                             },
                             socketHeartbeatInterval + 5000 * Math.random()
@@ -488,7 +502,7 @@ class SimpliSafe3 extends EventEmitter {
                 }
             } else if (message.source === 'messagequeue') {
                 const data = message.data;
-                if (data.sid !== this.subId) {
+                if (!data || data.sid !== this.subId) {
                     // Ignore event as it doesn't relate to this account
                     return;
                 }
@@ -619,14 +633,20 @@ class SimpliSafe3 extends EventEmitter {
             this.socket = null;
         }
 
-        clearTimeout(this.socketHeartbeatIntervalID);
+        clearInterval(this.socketHeartbeatIntervalID);
+        this.socketHeartbeatIntervalID = undefined;
         this.socketIsAlive = false;
 
-        const retryInterval = 2 ** this.nSocketConnectFailures * socketRetryInterval;
+        const retryInterval = Math.min(2 ** this.nSocketConnectFailures * socketRetryInterval, socketMaxRetryInterval);
         if (this.debug) this.log(`SSAPI socket connection lost. Next attempt will be in ${retryInterval / 1000}s.`);
-        setTimeout(async () => {
+        setTimeout(() => {
             this.isAwaitingSocketReconnect = false;
-            await this.startListening();
+            // startListening can reject (e.g. getUserId hits a rate limit); a floating
+            // rejection here would crash the bridge, so log it and schedule another try
+            this.startListening().catch((err) => {
+                this.log.error('SimpliSafe real time events reconnect failed:', err?.message ?? err);
+                this.handleSocketConnectionFailure();
+            });
         }, retryInterval);
         this.nSocketConnectFailures++;
         this.isAwaitingSocketReconnect = true;
@@ -680,6 +700,8 @@ class SimpliSafe3 extends EventEmitter {
         this.sensorSubscriptions = this.sensorSubscriptions.filter((sub) => sub.id !== id);
         if (this.sensorSubscriptions.length === 0) {
             clearInterval(this.sensorRefreshIntervalID);
+            // reset so the next subscribeToSensor starts a fresh refresh loop
+            this.sensorRefreshIntervalID = undefined;
         }
     }
 
