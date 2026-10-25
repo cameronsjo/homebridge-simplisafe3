@@ -100,3 +100,23 @@ test('a 401 on refresh clears the tokens and emits failure', async (t) => {
     assert.equal(auth.refreshToken, null);
     assert.equal(failures, 1);
 });
+
+test('a failed chmod warns once without debug, and the token is still stored', async (t) => {
+    const dir = tmpStorage(t);
+    const warnings = [];
+    const log = Object.assign(() => {}, { error: () => {}, warn: (m) => warnings.push(m) });
+    const auth = new SimpliSafe3AuthenticationManager(dir, log, false);
+    t.after(() => clearInterval(auth.refreshInterval));
+    fs.writeFileSync(path.join(dir, 'simplisafe3auth.json'), '{}');
+    t.mock.method(fs, 'chmodSync', () => {
+        throw Object.assign(new Error('EPERM: operation not permitted'), { code: 'EPERM' });
+    });
+
+    const token = { access_token: 'a', refresh_token: 'r', expires_in: 3600, token_type: 'Bearer' };
+    await auth._storeToken(token);
+    await auth._storeToken(token);
+
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /0600/);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'simplisafe3auth.json'), 'utf8')).refreshToken, 'r');
+});

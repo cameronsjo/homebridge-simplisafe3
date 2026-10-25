@@ -61,6 +61,7 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
     codeChallenge;
     expiry;
     refreshInterval;
+    chmodWarned = false;
     log;
     debug;
 
@@ -228,8 +229,13 @@ class SimpliSafe3AuthenticationManager extends events.EventEmitter {
         try {
             fs.chmodSync(accountsFile, 0o600);
         } catch (err) {
-            if (err.code !== 'ENOENT' && this.debug)
-                this.log(`Unable to restrict permissions on ${accountsFilename}: ${err.message}`);
+            // Warn once, debug or not: the user should know the token file stays readable
+            if (err.code !== 'ENOENT' && !this.chmodWarned) {
+                this.chmodWarned = true;
+                const msg = `Unable to restrict ${accountsFilename} to owner-only (0600), it may be readable by other users: ${err.message}`;
+                if (this.log.warn) this.log.warn(msg);
+                else this.log(msg);
+            }
         }
         try {
             fs.writeFileSync(accountsFile, JSON.stringify(account), { mode: 0o600 });
